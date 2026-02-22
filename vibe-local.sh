@@ -130,16 +130,35 @@ ensure_ollama() {
 
 # --- 変換プロキシの起動 ---
 ensure_proxy() {
-    # 既に起動している場合はスキップ
-    if curl -s --max-time 1 "$PROXY_URL/" &>/dev/null; then
-        return 0
+    # プロキシスクリプトが更新されていたら古いプロキシを再起動
+    if [ -f "$PROXY_PID_FILE" ]; then
+        local old_pid
+        old_pid="$(cat "$PROXY_PID_FILE")"
+        if kill -0 "$old_pid" 2>/dev/null; then
+            # スクリプトの更新チェック (mtime比較)
+            local script_mtime pid_mtime
+            script_mtime="$(stat -f %m "$PROXY_SCRIPT" 2>/dev/null || stat -c %Y "$PROXY_SCRIPT" 2>/dev/null || echo 0)"
+            pid_mtime="$(stat -f %m "$PROXY_PID_FILE" 2>/dev/null || stat -c %Y "$PROXY_PID_FILE" 2>/dev/null || echo 0)"
+            if [ "$script_mtime" -gt "$pid_mtime" ]; then
+                echo "🔄 プロキシスクリプトが更新されています。再起動します..."
+                kill "$old_pid" 2>/dev/null || true
+                rm -f "$PROXY_PID_FILE"
+                sleep 1
+            else
+                # スクリプト未更新 & プロキシ応答あり → 再利用
+                if curl -s --max-time 1 "$PROXY_URL/" &>/dev/null; then
+                    return 0
+                fi
+            fi
+        else
+            # プロセスが死んでいる → PIDファイル掃除
+            rm -f "$PROXY_PID_FILE"
+        fi
     fi
 
-    # 古いPIDファイルがあれば掃除
-    if [ -f "$PROXY_PID_FILE" ]; then
-        kill "$(cat "$PROXY_PID_FILE")" 2>/dev/null || true
-        rm -f "$PROXY_PID_FILE"
-        sleep 1
+    # 既に起動している場合はスキップ (PIDファイル無し but ポート応答あり)
+    if curl -s --max-time 1 "$PROXY_URL/" &>/dev/null; then
+        return 0
     fi
 
     # ポートが使用中なら別のポートを試す
