@@ -3311,6 +3311,10 @@ class TUI:
         self._spinner_thread = None
         self.is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
         self._is_cjk = self._detect_cjk_locale()
+        try:
+            self._term_cols = shutil.get_terminal_size((80, 24)).columns
+        except (ValueError, OSError):
+            self._term_cols = 80
 
         # Setup readline history (Windows guard - C14)
         if HAS_READLINE:
@@ -3467,7 +3471,8 @@ class TUI:
                         break
                     lines.append(line)
                 except (EOFError, KeyboardInterrupt):
-                    break
+                    print(f"\n{C.DIM}(Cancelled){C.RESET}")
+                    return None
             return "\n".join(lines)
 
         # IME-safe mode: if input looks like it might continue
@@ -3489,7 +3494,8 @@ class TUI:
                         break
                     lines.append(cont)
                 except (EOFError, KeyboardInterrupt):
-                    break
+                    print(f"\n{C.DIM}(Cancelled){C.RESET}")
+                    return None
             return "\n".join(lines)
 
         return first_line
@@ -3642,7 +3648,7 @@ class TUI:
         """Display a tool call being made with Claude Code-style formatting."""
         self.stop_spinner()
         icon, color = self._tool_icons().get(name, ("🔧", C.YELLOW))
-        max_display = 120
+        max_display = self._term_cols - 10
 
         if name == "Bash":
             cmd = params.get("command", "")
@@ -3837,43 +3843,50 @@ class TUI:
   {_c87}空行（Enter）で送信されます{C.RESET}
   {_c87}コマンド(/で始まる)は即時送信{C.RESET}
 """
+        sep_w = min(35, self._term_cols - 4)
+        sep = "━" * sep_w
         print(f"""
-  {_c51}{C.BOLD}━━ Commands ━━━━━━━━━━━━━━━━━━━━━━━{C.RESET}
+  {_c51}{C.BOLD}━━ Commands {sep[11:]}{C.RESET}
   {_c198}/help{C.RESET}              Show this help
-  {_c198}/exit{C.RESET}, {_c198}/quit{C.RESET}       Exit vibe-coder
+  {_c198}/exit{C.RESET}, {_c198}/quit{C.RESET}, {_c198}/q{C.RESET}  Exit vibe-coder
   {_c198}/clear{C.RESET}             Clear conversation
   {_c198}/model{C.RESET} <name>      Switch model
   {_c198}/status{C.RESET}            Session info
   {_c198}/save{C.RESET}              Save session
-  {_c198}/compact{C.RESET}           Compress history
+  {_c198}/compact{C.RESET}           Compress context to save memory
   {_c198}/undo{C.RESET}              Undo last file change
   {_c198}/config{C.RESET}            Show configuration
-  {_c198}/tokens{C.RESET}            Token usage bar
-  {_c198}/init{C.RESET}              Create CLAUDE.md for project
+  {_c198}/tokens{C.RESET}            Show token usage
+  {_c198}/init{C.RESET}              Create CLAUDE.md template
   {_c198}/yes{C.RESET}               Auto-approve ON
+  {_c198}/no{C.RESET}                Auto-approve OFF
+  {_c198}/resume{C.RESET}            Switch to a different session
   {_c198}\"\"\"{C.RESET}                Multi-line input
-  {_c51}━━ Git ━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C.RESET}
-  {_c198}/commit{C.RESET}            Auto-generate commit
+  {_c51}━━ Git {sep[6:]}{C.RESET}
+  {_c198}/commit{C.RESET}            Generate AI commit message
   {_c198}/diff{C.RESET}              Show git diff
-  {_c198}/git{C.RESET} <args>        Run git command
-  {_c51}━━ Plan Mode ━━━━━━━━━━━━━━━━━━━━━━{C.RESET}
-  {_c198}/plan{C.RESET}              Enter plan mode (read-only)
-  {_c198}/execute{C.RESET}           Exit plan mode
-  {_c51}━━ Keyboard ━━━━━━━━━━━━━━━━━━━━━━━{C.RESET}
-  {_c198}Ctrl+C{C.RESET}             Interrupt / stop
+  {_c198}/git{C.RESET} <args>        Run git commands
+  {_c51}━━ Plan Mode {sep[12:]}{C.RESET}
+  {_c198}/plan{C.RESET}              Enter plan mode
+  {_c198}/execute{C.RESET}           Execute plan
+  {_c51}━━ Keyboard {sep[11:]}{C.RESET}
+  {_c198}Ctrl+C{C.RESET}             Stop current task
   {_c198}Ctrl+C x2{C.RESET}          Exit (within 1.5s)
+  {_c198}Ctrl+D{C.RESET}             Exit
   {_c198}Up/Down{C.RESET}            Command history
-  {_c51}━━ CLI Flags ━━━━━━━━━━━━━━━━━━━━━━{C.RESET}
+  {_c51}━━ Startup Flags {sep[16:]}{C.RESET}
+  {_c198}-y{C.RESET}                 Auto-approve all
+  {_c198}--debug{C.RESET}            Enable debug output
   {_c198}--resume{C.RESET}           Resume last session
+  {_c198}--model NAME{C.RESET}       Use specific model
   {_c198}--session-id ID{C.RESET}    Resume specific session
   {_c198}--list-sessions{C.RESET}    List saved sessions
-  {_c198}-y{C.RESET}                 Auto-approve all
   {_c198}-p "prompt"{C.RESET}        One-shot mode
-  {_c51}━━ Tools ━━━━━━━━━━━━━━━━━━━━━━━━━━{C.RESET}
+  {_c51}━━ Tools {sep[8:]}{C.RESET}
   {_c87}Bash, Read, Write, Edit, Glob, Grep,{C.RESET}
   {_c87}WebFetch, WebSearch, NotebookEdit,{C.RESET}
   {_c87}TaskCreate/List/Get/Update, SubAgent{C.RESET}
-  {_c51}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C.RESET}{ime_hint}
+  {_c51}{sep}{C.RESET}{ime_hint}
 """)
 
     def show_status(self, session, config):
@@ -3888,14 +3901,16 @@ class TUI:
         filled = int(bar_len * pct / 100)
         bar_color = _ansi("\033[38;5;46m") if pct < 50 else _ansi("\033[38;5;226m") if pct < 80 else _ansi("\033[38;5;196m")
         bar = bar_color + "█" * filled + _c240 + "░" * (bar_len - filled) + C.RESET
+        sep_w = min(35, self._term_cols - 4)
+        sep = "━" * sep_w
         print(f"""
-  {_c51}━━ Status ━━━━━━━━━━━━━━━━━━━━━━━━━{C.RESET}
+  {_c51}━━ Status {sep[9:]}{C.RESET}
   {_c87}Session{C.RESET}   {session.session_id}
   {_c87}Messages{C.RESET}  {msgs}
   {_c87}Context{C.RESET}   [{bar}] {pct}%  ~{tokens}/{config.context_window}
   {_c87}Model{C.RESET}     {config.model}
   {_c87}CWD{C.RESET}       {os.getcwd()}
-  {_c51}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C.RESET}
+  {_c51}{sep}{C.RESET}
 """)
 
 
@@ -4375,13 +4390,19 @@ def main():
                     continue
                 elif cmd == "/save":
                     session.save()
+                    sessions_dir = os.path.join(config.state_dir, "sessions")
+                    filepath = os.path.join(sessions_dir, f"{session.session_id}.jsonl")
                     print(f"{C.GREEN}Session saved: {session.session_id}{C.RESET}")
+                    print(f"{C.DIM}  {filepath}{C.RESET}")
                     continue
                 elif cmd == "/compact":
                     before = session.get_token_estimate()
                     session.compact_if_needed(force=True)
                     after = session.get_token_estimate()
-                    print(f"{C.GREEN}Compacted: {before} -> {after} tokens{C.RESET}")
+                    if after < before:
+                        print(f"{C.GREEN}Compacted: {before} -> {after} tokens{C.RESET}")
+                    else:
+                        print(f"{C.DIM}Already compact ({after} tokens, {len(session.messages)} messages){C.RESET}")
                     continue
                 elif cmd == "/model":
                     parts = user_input.split(maxsplit=1)
@@ -4417,6 +4438,11 @@ def main():
                     config.yes_mode = True
                     permissions.yes_mode = True
                     print(f"{C.GREEN}Auto-approve enabled for this session.{C.RESET}")
+                    continue
+                elif cmd == "/no":
+                    config.yes_mode = False
+                    permissions.yes_mode = False
+                    print(f"{C.GREEN}Auto-approve disabled. Tool calls will require confirmation.{C.RESET}")
                     continue
                 elif cmd == "/tokens":
                     tokens = session.get_token_estimate()
