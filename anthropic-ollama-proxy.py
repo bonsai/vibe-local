@@ -472,12 +472,8 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
             self._respond(404, {"error": f"unknown path: {self.path}"})
 
     def _handle_web_search(self, req, req_id, t_start):
-        """Handle WebSearch sidecar call: search DuckDuckGo, return results as text.
-
-        Returns a simple text response (same format as normal model response).
-        Claude Code CLI takes this text and injects it as tool_result for the
-        main model, which then uses real search results instead of fabricating.
-        """
+        """Handle WebSearch sidecar call: search DuckDuckGo, return results
+        in Anthropic web_search_tool_result format so CLI counts searches."""
         # Extract query from user message
         messages = req.get("messages", [])
         query = ""
@@ -513,43 +509,19 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
             traceback.print_exc()
             results = None
 
-        # Build response text
-        if results is None:
-            response_text = (
-                f'Web search failed for "{query}" (offline or network error). '
-                f'Try using Bash(curl "URL") to fetch specific pages instead.'
-            )
-            result_count = 0
-        elif len(results) == 0:
-            response_text = f'No web search results found for "{query}".'
-            result_count = 0
-        else:
-            lines = [f'Web search results for "{query}":\n']
-            for i, r in enumerate(results, 1):
-                lines.append(f'{i}. {r["title"]}')
-                lines.append(f'   URL: {r["url"]}')
-                if r.get("snippet"):
-                    lines.append(f'   {r["snippet"]}')
-                lines.append("")
-            lines.append("IMPORTANT: These are real search results from DuckDuckGo. "
-                         "Use the URLs above as sources. Do NOT fabricate URLs.")
-            response_text = "\n".join(lines)
-            result_count = len(results)
+        result_count = len(results) if results else 0
 
         elapsed_ms = int((time.time() - t_start) * 1000)
         _log("websearch_response", {
             "query": query,
             "result_count": result_count,
             "elapsed_ms": elapsed_ms,
-            "response_length": len(response_text),
         }, req_id=req_id)
 
         msg_id = f"msg_{uuid.uuid4().hex[:24]}"
         model = req.get("model", "claude-haiku-4-5-20251001")
+        srvtool_id = f"srvtoolu_{uuid.uuid4().hex[:24]}"
 
-        # Return as simple streaming text response
-        # This is the same format qwen3:8b returns through the normal proxy path,
-        # which Claude Code CLI is proven to accept and use as tool_result.
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -566,26 +538,63 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
             },
         })
 
-        # Single text content block with search results
+        # Block 0: server_tool_use (tells CLI a web search was performed)
         self._send_sse("content_block_start", {
             "type": "content_block_start", "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        })
-        self._send_sse("content_block_delta", {
-            "type": "content_block_delta", "index": 0,
-            "delta": {"type": "text_delta", "text": response_text},
+            "content_block": {
+                "type": "server_tool_use", "id": srvtool_id,
+                "name": "web_search", "input": {"query": query},
+            },
         })
         self._send_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+
+        # Block 1: web_search_tool_result (actual search results)
+        if results is None:
+            # Offline / error
+            tool_result_content = [{
+                "type": "web_search_result",
+                "url": "", "title": "Search unavailable (offline)",
+                "page_age": "",
+                "snippet": f'Web search failed for "{query}". Try Bash(curl "URL") instead.',
+            }]
+        elif result_count == 0:
+            tool_result_content = [{
+                "type": "web_search_result",
+                "url": "", "title": "No results",
+                "page_age": "",
+                "snippet": f'No web search results found for "{query}".',
+            }]
+        else:
+            tool_result_content = []
+            for r in results:
+                tool_result_content.append({
+                    "type": "web_search_result",
+                    "url": r["url"],
+                    "title": r["title"],
+                    "page_age": "",
+                    "snippet": r.get("snippet", ""),
+                    "encrypted_content": "",
+                })
+
+        self._send_sse("content_block_start", {
+            "type": "content_block_start", "index": 1,
+            "content_block": {
+                "type": "web_search_tool_result",
+                "tool_use_id": srvtool_id,
+                "content": tool_result_content,
+            },
+        })
+        self._send_sse("content_block_stop", {"type": "content_block_stop", "index": 1})
 
         self._send_sse("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-            "usage": {"output_tokens": len(response_text) // 4},
+            "usage": {"output_tokens": result_count * 20},
         })
         self._send_sse("message_stop", {"type": "message_stop"})
         self.wfile.flush()
 
-        print(f"[proxy][websearch] Done in {elapsed_ms}ms, {result_count} results returned as text", file=sys.stderr)
+        print(f"[proxy][websearch] Done in {elapsed_ms}ms, {result_count} results (web_search_tool_result format)", file=sys.stderr)
 
     def _handle_messages(self, req):
         req_id = _next_request_id()
