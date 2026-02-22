@@ -141,6 +141,8 @@ trap cleanup EXIT
 
 # --- 引数パース ---
 AUTO_MODE=0
+SKIP_PERMISSIONS=""
+YES_FLAG=0
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -152,6 +154,10 @@ while [[ $# -gt 0 ]]; do
         --model)
             MODEL="$2"
             shift 2
+            ;;
+        -y|--yes)
+            YES_FLAG=1
+            shift
             ;;
         *)
             EXTRA_ARGS+=("$1")
@@ -195,15 +201,68 @@ fi
 # 変換プロキシ起動
 ensure_proxy || exit 1
 
+# --- パーミッション確認 ---
+# --dangerously-skip-permissions はツール実行を全自動化する。
+# ローカルLLMは精度が低いため、意図しないコマンドが実行される可能性がある。
+# ユーザーに明示的に確認を取る。
+
+if [ "$YES_FLAG" -eq 1 ]; then
+    SKIP_PERMISSIONS="--dangerously-skip-permissions"
+else
+    echo ""
+    echo "============================================"
+    echo " ⚠️  パーミッション確認 / Permission Check"
+    echo "============================================"
+    echo ""
+    echo " claude-local はデフォルトでツール自動許可モード"
+    echo " (--dangerously-skip-permissions) で起動します。"
+    echo ""
+    echo " This means the AI can execute commands, read/write"
+    echo " files, and modify your system WITHOUT asking."
+    echo ""
+    echo " ローカルLLMはクラウドAIより精度が低いため、"
+    echo " 意図しない操作が実行される可能性があります。"
+    echo ""
+    echo " Local LLMs are less accurate than cloud AI."
+    echo " Unintended actions may occur."
+    echo ""
+    echo " 本地LLM精度较低，可能执行非预期操作。"
+    echo ""
+    echo "--------------------------------------------"
+    echo " [Y] 自動許可モード (Auto-approve all tools)"
+    echo " [n] 通常モード (Ask before each tool use)"
+    echo "--------------------------------------------"
+    echo ""
+    printf " 続行しますか？ / Continue? [Y/n]: "
+    read -r REPLY </dev/tty 2>/dev/null || read -r REPLY 2>/dev/null || REPLY="Y"
+    echo ""
+
+    case "$REPLY" in
+        [nN]|[nN][oO]|いいえ|否)
+            SKIP_PERMISSIONS=""
+            echo " → 通常モード (毎回確認) で起動します"
+            ;;
+        *)
+            SKIP_PERMISSIONS="--dangerously-skip-permissions"
+            echo " → 自動許可モードで起動します"
+            ;;
+    esac
+fi
+
+PERM_LABEL="ツール自動許可 (auto-approve)"
+if [ -z "$SKIP_PERMISSIONS" ]; then
+    PERM_LABEL="通常モード (ask each time)"
+fi
+
 echo ""
 echo "============================================"
 echo " 🤖 Claude Code (ローカルモード)"
 echo " Model: $MODEL"
 echo " Proxy: $PROXY_URL → $OLLAMA_HOST"
-echo " Permissions: ツール自動許可 (ローカル専用)"
+echo " Permissions: $PERM_LABEL"
 echo "============================================"
 echo ""
 
 ANTHROPIC_BASE_URL="$PROXY_URL" \
 ANTHROPIC_API_KEY="local" \
-exec claude --model "$MODEL" --dangerously-skip-permissions "${EXTRA_ARGS[@]}"
+exec claude --model "$MODEL" $SKIP_PERMISSIONS "${EXTRA_ARGS[@]}"

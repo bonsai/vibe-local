@@ -277,11 +277,65 @@ Ollama (local LLM runtime)
 qwen3-coder:30b (AI model)
 ```
 
-## ⚠️ Notes
+## 🚨 Security / リスクについて / 安全须知
+
+### 🇯🇵 日本語
+
+> **このツールは自己責任でご利用ください。**
+
+`claude-local` は初回起動時に **ツール自動許可モード** (`--dangerously-skip-permissions`) を使うか確認します。
+自動許可モードを選ぶと、AIがファイルの読み書き・コマンド実行・システム操作を **確認なしで** 実行します。
+
+- ローカルLLMはクラウドAI (Claude) より **精度が低い** ため、意図しない操作が実行される可能性があります
+- 重要なファイルがあるディレクトリでの使用は慎重に行ってください
+- 心配な場合は起動時に `n` を選択すると、毎回確認を求める通常モードで動きます
+- `-y` フラグで確認をスキップできますが、リスクを理解した上でご利用ください
+
+```bash
+claude-local        # 毎回パーミッション確認あり（初回に選択）
+claude-local -y     # 確認スキップ（自動許可モード）
+```
+
+### 🇺🇸 English
+
+> **Use this tool at your own risk.**
+
+On first launch, `claude-local` asks whether to enable **auto-approve mode** (`--dangerously-skip-permissions`).
+In auto-approve mode, the AI can read/write files, execute commands, and modify your system **without asking**.
+
+- Local LLMs are **less accurate** than cloud AI (Claude), so unintended actions may occur
+- Be careful when using in directories with important files
+- Choose `n` at the prompt to use normal mode (asks before each tool use)
+- The `-y` flag skips the prompt — only use it if you understand the risks
+
+```bash
+claude-local        # Permission check on first launch
+claude-local -y     # Skip check (auto-approve mode)
+```
+
+### 🇨🇳 中文
+
+> **使用本工具风险自负。**
+
+首次启动时，`claude-local` 会询问是否启用 **工具自动批准模式** (`--dangerously-skip-permissions`)。
+在自动批准模式下，AI可以读写文件、执行命令、修改系统，**无需确认**。
+
+- 本地LLM的精度 **低于** 云端AI (Claude)，可能执行非预期操作
+- 在包含重要文件的目录中使用时请谨慎
+- 选择 `n` 将使用普通模式（每次工具使用前询问）
+- `-y` 参数跳过确认 - 请在理解风险后使用
+
+```bash
+claude-local        # 首次启动时确认权限
+claude-local -y     # 跳过确认（自动批准模式）
+```
+
+---
+
+## ⚠️ Other Notes
 
 - Local LLM accuracy is lower than Claude API
 - First model download takes time (several GB to 20GB)
-- Uses `--dangerously-skip-permissions` — for local use only
 - Use `claude-local --auto` to auto-switch to Claude API when online
 
 ## 📄 License
