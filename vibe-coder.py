@@ -25,7 +25,6 @@ import fnmatch
 import platform
 import shutil
 import tempfile
-import textwrap
 import threading
 import unicodedata
 import urllib.request
@@ -308,12 +307,9 @@ class Config:
             self.model = "qwen3-coder:30b"
         elif ram_gb >= 16:
             self.model = "qwen3:8b"
-        elif ram_gb >= 8:
+        else:  # < 16 GB RAM
             self.model = "qwen3:1.7b"
             self.context_window = 4096  # small model = small context
-        else:
-            self.model = "qwen3:1.7b"
-            self.context_window = 4096
 
         if not self.sidecar_model:
             if ram_gb >= 32:
