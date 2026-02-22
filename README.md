@@ -550,11 +550,166 @@ vibe-local -y     # 自动批准模式（仅限高级用户，风险自负）
 
 ---
 
+## 🎓 Workshop Guide / ワークショップガイド / 工作坊指南
+
+### 🇯🇵 大学・ワークショップでの利用
+
+vibe-local は**大学の授業やワークショップ**で、AIエージェントを使ったコーディングを体験してもらうために設計されています。
+
+#### 事前準備（講師向け）
+
+```bash
+# 1. 会場のMacに事前インストール（ネットワーク接続時）
+curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
+
+# 2. モデルを事前ダウンロード（オフライン対応）
+ollama pull qwen3:8b          # 16GB Mac用
+ollama pull qwen3-coder:30b   # 32GB Mac用（推奨）
+
+# 3. 動作確認
+vibe-local -p "Hello, World!をPythonで書いて"
+```
+
+#### 受講者向けの最初の課題例
+
+```
+1. "じゃんけんゲームをPythonで作って"         → 基本的なプログラミング
+2. "このフォルダにあるファイルを一覧にして"      → ターミナル操作の学習
+3. "HTMLでタイマーアプリを作ってブラウザで開いて"  → Web開発体験
+4. "マインスイーパをHTMLで作って"              → ゲーム開発
+5. "現在のシステム情報を調べて"                → OS操作の理解
+```
+
+#### 注意事項
+- **初回は必ず通常モード（`n`）で起動** — AIの操作を1つずつ確認できます
+- ローカルLLMはクラウドAIより精度が低いため、**間違った操作をすることがあります**
+- **新しい空のフォルダで作業する**ことを推奨します
+- 困ったら **`Ctrl+C`** でいつでも停止できます
+
+### 🇺🇸 University & Workshop Usage
+
+vibe-local is designed for **university classes and workshops** where participants experience AI-agent-assisted coding.
+
+#### Pre-setup (Instructor)
+
+```bash
+# 1. Pre-install on venue Macs (while online)
+curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
+
+# 2. Pre-download models (for offline use)
+ollama pull qwen3:8b          # For 16GB Macs
+ollama pull qwen3-coder:30b   # For 32GB Macs (recommended)
+
+# 3. Verify
+vibe-local -p "Write Hello World in Python"
+```
+
+#### Starter exercises for students
+
+```
+1. "Create a rock-paper-scissors game in Python"    → Basic programming
+2. "List all files in this folder"                  → Terminal operations
+3. "Create a timer app in HTML and open it"         → Web development
+4. "Create minesweeper in HTML"                     → Game development
+5. "Check the current system information"           → OS operations
+```
+
+---
+
+## 📡 Offline Capabilities / オフライン機能 / 离线功能
+
+### 🇯🇵
+
+vibe-local はオフライン環境に特化しています。以下が**オフラインで動作する**機能です：
+
+| 機能 | オフライン | 備考 |
+|------|:--------:|------|
+| コード生成・実行 | ✅ | 全てローカルで処理 |
+| ファイル操作 (読み書き・編集) | ✅ | |
+| ターミナルコマンド実行 | ✅ | |
+| Git操作 (ローカル) | ✅ | push/pullはオンライン必要 |
+| HTMLアプリ作成・表示 | ✅ | ブラウザで開くだけ |
+| Web検索 (WebSearch) | ❌ | オフラインでは利用不可 |
+| URLフェッチ (WebFetch) | ❌ | オフラインでは利用不可 |
+| パッケージインストール (pip/brew) | ❌ | オフラインでは利用不可 |
+
+#### オフラインでの調べもの
+
+Web検索が使えない場合でも、以下の方法で調査できます：
+- **ローカルファイル検索**: `Grep` / `Glob` ツールでプロジェクト内を検索
+- **man コマンド**: `Bash(man curl)` でコマンドのマニュアルを参照
+- **事前ダウンロード**: ワークショップ前に必要な資料をローカルに保存しておく
+
+### 🇺🇸
+
+vibe-local is optimized for offline environments:
+
+| Feature | Offline | Notes |
+|---------|:-------:|-------|
+| Code generation & execution | ✅ | All processed locally |
+| File operations (read/write/edit) | ✅ | |
+| Terminal command execution | ✅ | |
+| Git operations (local) | ✅ | push/pull need network |
+| HTML app creation & viewing | ✅ | Just opens in browser |
+| Web search (WebSearch) | ❌ | Not available offline |
+| URL fetch (WebFetch) | ❌ | Not available offline |
+| Package install (pip/brew) | ❌ | Not available offline |
+
+---
+
+## ⚖️ Legal / 適法性 / 法律合规
+
+### 🇯🇵 適法性に関する説明
+
+本ツールの法的性質を透明に説明します：
+
+**本ツールが行うこと：**
+- Claude Code CLI（Anthropic社が公開しているコマンドラインツール）を起動します
+- Claude Code が送信するAPIリクエストの宛先を、ローカルのプロキシサーバーに変更します（`ANTHROPIC_BASE_URL` 環境変数を利用）
+- プロキシサーバーがリクエストを変換し、ローカルで動作するOllama（オープンソースのLLMランタイム）に転送します
+- Anthropic社のサーバーへの通信は一切行いません
+
+**使用するソフトウェアのライセンス：**
+- **Claude Code CLI**: Anthropic社が提供するソフトウェア。利用にはAnthropicのアカウントが必要です
+- **Ollama**: MIT License のオープンソースソフトウェア
+- **Qwen3 モデル**: Apache 2.0 License で公開されているオープンソースモデル
+- **vibe-local**: MIT License
+
+**注意すべき点：**
+- Claude Code CLI を Anthropic API 以外のバックエンドで使用することは、Anthropic の利用規約（Terms of Service）で明示的に許可も禁止もされていない領域です
+- 本ツールは Anthropic のサービスに負荷をかけたり、APIキーを不正使用したりするものではありません
+- ユーザーは Anthropic の最新の利用規約を自身で確認する責任があります
+- 本ツールは研究・教育目的のユーティリティであり、商用利用を想定していません
+
+### 🇺🇸 Legal Explanation
+
+**What this tool does:**
+- Launches the Claude Code CLI (a command-line tool published by Anthropic)
+- Redirects API requests to a local proxy server (using `ANTHROPIC_BASE_URL` environment variable)
+- The proxy translates requests and forwards them to Ollama (open-source LLM runtime) running locally
+- No communication with Anthropic's servers occurs
+
+**Software licenses:**
+- **Claude Code CLI**: Software provided by Anthropic. Requires an Anthropic account
+- **Ollama**: Open-source software under MIT License
+- **Qwen3 models**: Open-source models under Apache 2.0 License
+- **vibe-local**: MIT License
+
+**Points to note:**
+- Using Claude Code CLI with a non-Anthropic backend is neither explicitly permitted nor prohibited in Anthropic's current Terms of Service
+- This tool does not place any load on Anthropic's services or misuse API keys
+- Users are responsible for reviewing Anthropic's current Terms of Service
+- This tool is intended for research and education, not commercial use
+
+---
+
 ## ⚙️ Notes
 
 - Local LLM accuracy is lower than Claude API
 - First model download takes time (several GB to 20GB)
 - Use `vibe-local --auto` to auto-switch to Claude API when online
+- WebSearch/WebFetch tools require network — they do not work offline
+- Large installs (MacTeX ~4GB, Xcode tools) take significant time
 
 ---
 
