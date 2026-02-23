@@ -35,7 +35,7 @@ VIBE_LOCAL_DEBUG=0
 # [C1 fix] source ではなく grep + cut で既知キーのみ安全に読む
 # cut is safer than sed for values containing special characters
 if [ -f "$CONFIG_FILE" ]; then
-    _val() { grep -E "^${1}=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^[\"']//;s/[\"']$//;s/[[:space:]]*#.*//" || true; }
+    _val() { grep -E "^${1}=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r' | sed "s/^[\"']//;s/[\"'[:space:]]*$//;s/[[:space:]]*#.*//" || true; }
     _m="$(_val MODEL)"
     _s="$(_val SIDECAR_MODEL)"
     _h="$(_val OLLAMA_HOST)"
@@ -183,16 +183,19 @@ if [ -n "$MODEL" ]; then
 import sys,json
 try:
     d=json.load(sys.stdin)
-    names=[m['name'] for m in d.get('models',[])]
-    sys.exit(0 if '$MODEL' in names or '$MODEL:latest' in names else 1)
+    names=[m['name'].strip() for m in d.get('models',[])]
+    want='$MODEL'.strip()
+    sys.exit(0 if want in names or want+':latest' in names or any(n.startswith(want+':') or n==want for n in names) else 1)
 except: sys.exit(1)
 " 2>/dev/null; then
-        echo "❌ エラー: モデル $MODEL が見つかりません"
+        echo "❌ AIモデル $MODEL がまだダウンロードされていません"
         echo ""
-        echo "対処法:"
+        echo "ダウンロードするには、以下のコマンドを貼り付けてEnterを押してください:"
         echo "  ollama pull \"$MODEL\""
         echo ""
-        echo "利用可能なモデル:"
+        echo "(数分～数十分かかります。完了後に再度 vibe-local を実行してください)"
+        echo ""
+        echo "インストール済みモデル:"
         curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null | python3 -c "
 import sys, json
 try:
