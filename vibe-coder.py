@@ -55,7 +55,7 @@ _bg_task_counter = [0]
 _bg_tasks_lock = threading.Lock()
 MAX_BG_TASKS = 50  # Prevent unbounded memory growth
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # ════════════════════════════════════════════════════════════════════════════════
 # ANSI Colors
@@ -799,7 +799,7 @@ class OllamaClient:
         self.context_window = config.context_window
         self.debug = config.debug
         self.timeout = 300
-        self._supports_tool_streaming = False  # auto-detected on first tool+stream call
+        self._supports_tool_streaming = None  # None=untested, True/False=detected
 
     def check_connection(self, retries=3):
         """Check if Ollama is reachable. Returns (ok, model_list)."""
@@ -818,6 +818,36 @@ class OllamaClient:
                     time.sleep(1)
                     continue
                 return False, []
+
+    def detect_tool_streaming(self):
+        """Auto-detect if Ollama supports streaming with tool calls (0.5+).
+        Calls /api/version and checks semver >= 0.5.0."""
+        if self._supports_tool_streaming is not None:
+            return self._supports_tool_streaming
+        try:
+            url = f"{self.base_url}/api/version"
+            resp = urllib.request.urlopen(url, timeout=5)
+            try:
+                data = json.loads(resp.read(4096))
+            finally:
+                resp.close()
+            version_str = data.get("version", "0.0.0")
+            # Parse major.minor from version string (e.g. "0.5.4", "0.6.0-rc1")
+            m = re.match(r"(\d+)\.(\d+)", version_str)
+            if m:
+                major, minor = int(m.group(1)), int(m.group(2))
+                supported = (major, minor) >= (0, 5)
+            else:
+                supported = False
+            self._supports_tool_streaming = supported
+            if self.debug:
+                print(f"{C.DIM}[debug] Ollama version={version_str} "
+                      f"tool_streaming={'yes' if supported else 'no'}{C.RESET}",
+                      file=sys.stderr)
+            return supported
+        except Exception:
+            self._supports_tool_streaming = False
+            return False
 
     def check_model(self, model_name, available_models=None):
         """Check if a specific model is available (exact or tag match).
@@ -905,9 +935,8 @@ class OllamaClient:
             payload["tool_choice"] = "auto"
             # Lower temperature for tool-calling (improves JSON reliability)
             payload["temperature"] = min(self.temperature, 0.3)
-            # Try streaming with tools (Ollama 0.5+ supports this)
-            # Falls back to sync in the caller if streaming fails
-            if not self._supports_tool_streaming:
+            # Auto-detect streaming with tools (Ollama 0.5+ supports this)
+            if not self.detect_tool_streaming():
                 if stream:
                     payload["stream"] = False
                     stream = False
@@ -1537,6 +1566,7 @@ class ReadTool(Tool):
             # Use islice for efficient partial reads (skips lines at C level)
             start = max(0, offset - 1)
             output_parts = []
+            total_lines = None
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 for i, line in enumerate(islice(f, start, start + limit)):
                     lineno = start + i
@@ -1544,10 +1574,20 @@ class ReadTool(Tool):
                     if len(line) > 2000:
                         line = line[:2000] + "...(truncated)\n"
                     output_parts.append(f"{lineno + 1:>6}\t{line}")
+                # Count remaining lines to detect truncation
+                remaining = sum(1 for _ in f)
+                if remaining > 0:
+                    total_lines = start + len(output_parts) + remaining
 
             if not output_parts:
                 return "(empty file)"
-            return "".join(output_parts)
+            result = "".join(output_parts)
+            if total_lines is not None:
+                shown_start = start + 1
+                shown_end = start + len(output_parts)
+                result += (f"\n(truncated: showing lines {shown_start}-{shown_end} "
+                           f"of {total_lines} total. Use offset/limit to read more.)")
+            return result
         except Exception as e:
             return f"Error reading file: {e}"
 
@@ -3690,7 +3730,17 @@ class MultiAgentCoordinator:
         for t in threads:
             t.join(timeout=300)  # 5 min max per agent
 
-        return [r for r in results if r is not None]
+        # Mark timed-out agents
+        for i, r in enumerate(results):
+            if r is None:
+                results[i] = {
+                    "prompt": tasks[i].get("prompt", "")[:100] if i < len(tasks) else "",
+                    "result": "",
+                    "duration": 300.0,
+                    "error": "Agent timed out (300s limit)",
+                }
+
+        return results
 
 
 class ParallelAgentTool(Tool):
@@ -3743,19 +3793,40 @@ class ParallelAgentTool(Tool):
 
         results = self._coordinator.run_parallel(tasks)
 
+        succeeded = sum(1 for r in results if not r["error"])
+        failed = len(results) - succeeded
+        total_time = max((r["duration"] for r in results), default=0)
+
         output_parts = []
         for i, r in enumerate(results):
-            header = f"━━ Agent {i+1}: {r['prompt'][:60]}"
+            status = "FAIL" if r["error"] else "OK"
+            prompt_display = r['prompt'][:80]
+            output_parts.append(f"┌─── Agent {i+1}/{len(results)} [{status}] ───")
+            output_parts.append(f"│ Task: {prompt_display}")
+            output_parts.append(f"│ Time: {r['duration']:.1f}s")
             if r["error"]:
-                output_parts.append(f"{header}\nError: {r['error']}")
+                output_parts.append(f"│ Error: {r['error']}")
             else:
-                output_parts.append(f"{header} ({r['duration']:.1f}s)\n{r['result']}")
+                # Indent result lines for readability, truncate very long results
+                result_text = r["result"]
+                if len(result_text) > 3000:
+                    result_text = result_text[:3000] + "\n...(result truncated)"
+                for line in result_text.split("\n"):
+                    output_parts.append(f"│ {line}")
+            output_parts.append(f"└{'─' * 40}")
+
+        summary = f"Summary: {succeeded}/{len(results)} succeeded"
+        if failed:
+            summary += f", {failed} failed"
+        summary += f" (total wall time: {total_time:.1f}s)"
+        output_parts.append(summary)
 
         with _print_lock:
-            print(f"  {_ansi(chr(27)+'[38;5;141m')}🤖 All {len(results)} agents finished.{C.RESET}",
+            print(f"  {_ansi(chr(27)+'[38;5;141m')}🤖 All {len(results)} agents finished "
+                  f"({succeeded} OK, {failed} failed, {total_time:.1f}s){C.RESET}",
                   flush=True)
 
-        return "\n\n".join(output_parts)
+        return "\n".join(output_parts)
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -5690,7 +5761,8 @@ def main():
 
     # Show banner immediately so user sees output while connecting
     tui = TUI(config)
-    tui.banner(config, model_ok=True)  # show banner before connection check
+    if not config.prompt:
+        tui.banner(config, model_ok=True)  # skip banner in one-shot mode (-p)
 
     # Check Ollama connection
     client = OllamaClient(config)

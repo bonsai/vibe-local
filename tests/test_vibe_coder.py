@@ -4859,7 +4859,7 @@ class TestTokenUsageDisplay:
 
     def test_version_bump(self):
         """Verify version was bumped for this feature release."""
-        assert vc.__version__ == "1.1.0"
+        assert vc.__version__ == "1.2.0"
 
     def test_bash_tool_has_run_in_background_param(self):
         tool = vc.BashTool()
@@ -7717,3 +7717,239 @@ class TestStreamingEnhancement:
         with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
             content = f.read()
         assert "def add_system_note" in content
+
+
+class TestStreamingAutoDetection:
+    """Tests for Ollama version-based tool streaming auto-detection."""
+
+    def test_detect_tool_streaming_flag_starts_none(self):
+        """_supports_tool_streaming should start as None (untested)."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        assert client._supports_tool_streaming is None
+
+    def test_detect_tool_streaming_caches_result(self):
+        """detect_tool_streaming should cache the result after first call."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        # Manually set to True to test caching
+        client._supports_tool_streaming = True
+        result = client.detect_tool_streaming()
+        assert result is True
+
+    def test_detect_tool_streaming_version_parse_055(self):
+        """Should detect Ollama 0.5.5 as supporting tool streaming."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        version_response = json.dumps({"version": "0.5.5"}).encode()
+        with mock.patch("urllib.request.urlopen") as mock_url:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = version_response
+            mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = mock.MagicMock(return_value=False)
+            mock_url.return_value = mock_resp
+            result = client.detect_tool_streaming()
+        assert result is True
+        assert client._supports_tool_streaming is True
+
+    def test_detect_tool_streaming_version_parse_042(self):
+        """Should detect Ollama 0.4.2 as NOT supporting tool streaming."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        version_response = json.dumps({"version": "0.4.2"}).encode()
+        with mock.patch("urllib.request.urlopen") as mock_url:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = version_response
+            mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = mock.MagicMock(return_value=False)
+            mock_url.return_value = mock_resp
+            result = client.detect_tool_streaming()
+        assert result is False
+
+    def test_detect_tool_streaming_version_parse_100(self):
+        """Should detect Ollama 1.0.0 as supporting tool streaming."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        version_response = json.dumps({"version": "1.0.0"}).encode()
+        with mock.patch("urllib.request.urlopen") as mock_url:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = version_response
+            mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = mock.MagicMock(return_value=False)
+            mock_url.return_value = mock_resp
+            result = client.detect_tool_streaming()
+        assert result is True
+
+    def test_detect_tool_streaming_network_error(self):
+        """Should return False on network error."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        with mock.patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
+            result = client.detect_tool_streaming()
+        assert result is False
+        assert client._supports_tool_streaming is False
+
+    def test_detect_tool_streaming_rc_version(self):
+        """Should handle release candidate versions like 0.6.0-rc1."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        version_response = json.dumps({"version": "0.6.0-rc1"}).encode()
+        with mock.patch("urllib.request.urlopen") as mock_url:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = version_response
+            mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = mock.MagicMock(return_value=False)
+            mock_url.return_value = mock_resp
+            result = client.detect_tool_streaming()
+        assert result is True
+
+    def test_chat_uses_detect_tool_streaming(self):
+        """chat() should call detect_tool_streaming when tools are present."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "self.detect_tool_streaming()" in content
+        # Old pattern should be gone
+        assert "if not self._supports_tool_streaming:" not in content
+
+
+class TestReadToolTruncationHint:
+    """Tests for Read tool truncation hint when files are partially read."""
+
+    def test_no_truncation_for_small_files(self):
+        """Small files should not show truncation hint."""
+        tool = vc.ReadTool()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            for i in range(10):
+                f.write(f"Line {i+1}\n")
+            f.flush()
+            path = f.name
+        try:
+            result = tool.execute({"file_path": path})
+            assert "truncated" not in result
+            assert "Line 1" in result
+            assert "Line 10" in result
+        finally:
+            os.unlink(path)
+
+    def test_truncation_hint_for_large_files(self):
+        """Files larger than limit should show truncation hint."""
+        tool = vc.ReadTool()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            for i in range(100):
+                f.write(f"Line {i+1}\n")
+            f.flush()
+            path = f.name
+        try:
+            result = tool.execute({"file_path": path, "limit": 10})
+            assert "truncated" in result
+            assert "showing lines 1-10" in result
+            assert "of 100 total" in result
+            assert "Use offset/limit to read more" in result
+        finally:
+            os.unlink(path)
+
+    def test_truncation_hint_with_offset(self):
+        """Truncation hint should show correct range with offset."""
+        tool = vc.ReadTool()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            for i in range(200):
+                f.write(f"Line {i+1}\n")
+            f.flush()
+            path = f.name
+        try:
+            result = tool.execute({"file_path": path, "offset": 50, "limit": 20})
+            assert "truncated" in result
+            assert "showing lines 50-69" in result
+            assert "of 200 total" in result
+        finally:
+            os.unlink(path)
+
+    def test_no_truncation_when_reading_all(self):
+        """No truncation hint when limit covers entire file."""
+        tool = vc.ReadTool()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            for i in range(50):
+                f.write(f"Line {i+1}\n")
+            f.flush()
+            path = f.name
+        try:
+            result = tool.execute({"file_path": path, "limit": 2000})
+            assert "truncated" not in result
+        finally:
+            os.unlink(path)
+
+    def test_default_limit_truncation(self):
+        """Files > 2000 lines should show truncation with default limit."""
+        tool = vc.ReadTool()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            for i in range(2500):
+                f.write(f"L{i+1}\n")
+            f.flush()
+            path = f.name
+        try:
+            result = tool.execute({"file_path": path})
+            assert "truncated" in result
+            assert "showing lines 1-2000" in result
+            assert "of 2500 total" in result
+        finally:
+            os.unlink(path)
+
+
+class TestParallelAgentsOutputFormat:
+    """Tests for improved ParallelAgents output formatting."""
+
+    def test_output_has_box_drawing(self):
+        """Output should use box-drawing characters for clarity."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Check for box-drawing characters in ParallelAgentTool
+        assert "┌─── Agent" in content
+        assert "│ Task:" in content
+        assert "│ Time:" in content
+        assert "└" in content
+
+    def test_output_has_summary(self):
+        """Output should include a summary line."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "Summary:" in content
+        assert "succeeded" in content
+
+    def test_result_truncation_at_3000(self):
+        """Very long agent results should be truncated."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "result truncated" in content
+        assert "3000" in content
+
+    def test_timeout_handling(self):
+        """Timed-out agents should be marked with error."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "Agent timed out" in content
+
+    def test_status_ok_and_fail(self):
+        """Output should show OK/FAIL status per agent."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "[OK]" in content or "OK" in content
+        assert "[FAIL]" in content or "FAIL" in content
+
+
+class TestOneShotBannerSuppression:
+    """Tests for banner suppression in one-shot (-p) mode."""
+
+    def test_banner_skipped_in_oneshot(self):
+        """Banner should not be shown in one-shot mode."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Should check config.prompt before showing banner
+        assert "if not config.prompt:" in content
+        assert "tui.banner(config" in content
+
+    def test_banner_shown_in_interactive(self):
+        """Banner should still be shown in interactive mode."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # The banner call should exist (not deleted entirely)
+        assert "tui.banner(config, model_ok=True)" in content
