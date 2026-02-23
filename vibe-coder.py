@@ -55,7 +55,7 @@ _bg_task_counter = [0]
 _bg_tasks_lock = threading.Lock()
 MAX_BG_TASKS = 50  # Prevent unbounded memory growth
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 # ════════════════════════════════════════════════════════════════════════════════
 # ANSI Colors
