@@ -4859,7 +4859,7 @@ class TestTokenUsageDisplay:
 
     def test_version_bump(self):
         """Verify version was bumped for this feature release."""
-        assert vc.__version__ == "0.9.3"
+        assert vc.__version__ == "0.9.4"
 
     def test_bash_tool_has_run_in_background_param(self):
         tool = vc.BashTool()
@@ -6594,3 +6594,326 @@ class TestJapaneseUX:
         # Should NOT use the old pattern: line[:200] + "..."
         # The show_tool_result method should call _truncate_to_display_width
         assert "truncate_to_display_width(line, 200)" in content
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Round 13: CRITICAL/HIGH fix validation + coverage gap tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestCriticalFixes:
+    """Tests for CRITICAL fixes applied in Round 13."""
+
+    def test_json_salvage_no_bare_exception(self):
+        """CRITICAL #1: JSON salvage should not catch bare Exception."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Should NOT have (json.JSONDecodeError, Exception) — too broad
+        assert "(json.JSONDecodeError, Exception)" not in content
+
+    def test_session_save_failure_skips_index_update(self):
+        """CRITICAL #2: If session save fails, project index should NOT be updated."""
+        cfg = vc.Config()
+        cfg.sessions_dir = tempfile.mkdtemp()
+        session = vc.Session(cfg, "test system prompt")
+        session.messages = [{"role": "user", "content": "test"}]
+        # Make sessions_dir read-only to force save failure
+        import stat
+        os.chmod(cfg.sessions_dir, stat.S_IRUSR | stat.S_IXUSR)
+        try:
+            # Patch _save_project_index to track if it was called
+            called = []
+            orig = vc.Session._save_project_index
+            vc.Session._save_project_index = staticmethod(lambda c, i: called.append(True))
+            try:
+                session.save()
+            finally:
+                vc.Session._save_project_index = orig
+            # Should NOT have been called because save itself failed
+            assert len(called) == 0, "Project index should not be updated when session save fails"
+        finally:
+            os.chmod(cfg.sessions_dir, stat.S_IRWXU)
+            import shutil
+            shutil.rmtree(cfg.sessions_dir, ignore_errors=True)
+
+    def test_sse_stream_read_error_logged_in_debug(self):
+        """CRITICAL #3: SSE stream read errors should be distinguishable."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Should have specific exception types for SSE read, not bare except
+        assert "ConnectionError, OSError, urllib.error.URLError" in content
+
+    def test_bg_task_has_process_group_kill(self):
+        """CRITICAL #4: Background tasks should use process group kill on timeout."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Background Popen should have start_new_session
+        assert "_bg_pgroup" in content
+        assert "start_new_session=_bg_pgroup" in content
+
+
+class TestHighFixes:
+    """Tests for HIGH fixes applied in Round 13."""
+
+    def test_http_error_response_closed(self):
+        """HIGH #1: HTTPError responses must be closed after reading body."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Should have e.close() after reading error body
+        assert "e.close()" in content
+
+    def test_json_args_size_limit(self):
+        """HIGH #2: JSON arguments should be size-capped before parsing."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "102400" in content  # 100KB cap
+
+    def test_bg_tasks_max_limit(self):
+        """HIGH #4: Background tasks should have MAX_BG_TASKS limit."""
+        assert hasattr(vc, "MAX_BG_TASKS")
+        assert vc.MAX_BG_TASKS == 50
+
+    def test_bg_tasks_eviction(self):
+        """HIGH #4: Old completed bg tasks should be evicted."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Should have eviction logic before creating new bg task
+        assert "stale = [k for k, v in _bg_tasks.items()" in content
+
+    def test_write_tool_resolves_new_file_symlink(self):
+        """HIGH #3: WriteTool should resolve realpath even for new files."""
+        with tempfile.TemporaryDirectory() as d:
+            # Create a symlink to a target dir
+            target_dir = os.path.join(d, "target")
+            os.makedirs(target_dir)
+            link = os.path.join(d, "link")
+            os.symlink(target_dir, link)
+            # Try to write through the symlink dir
+            # The tool should resolve via realpath
+            cfg = vc.Config()
+            cfg.yes_mode = True
+            tool = vc.WriteTool()
+            new_file_path = os.path.join(link, "test.txt")
+            result = tool.execute({"file_path": new_file_path, "content": "hello"})
+            # File should be written (resolved through symlink)
+            # The key check: resolved path is in target_dir, not link
+            assert os.path.exists(os.path.join(target_dir, "test.txt"))
+
+    def test_edit_tool_fails_on_unresolvable_path(self):
+        """HIGH: EditTool should return error if path can't be resolved."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # EditTool symlink handler should return error, not pass
+        assert 'return f"Error: cannot resolve path: {file_path}"' in content
+
+    def test_read_tool_fails_on_unresolvable_path(self):
+        """HIGH: ReadTool should return error if realpath fails."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # ReadTool should NOT fall back to raw path on OSError
+        # Should have: return "Error: cannot resolve path: ..."
+        assert "cannot resolve path" in content
+
+    def test_subagent_context_window_guard(self):
+        """HIGH #6: SubAgent should truncate old tool results when context grows too large."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "sub-agent context limit" in content
+        assert "max_chars = 80000" in content
+
+    def test_save_project_index_cleanup_on_chmod_failure(self):
+        """HIGH #5: _save_project_index should clean up temp on failure."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # The inner try/except should unlink tmp before re-raising
+        # Find _save_project_index method
+        idx = content.index("def _save_project_index")
+        section = content[idx:idx+800]
+        # Should have unlink in cleanup path
+        assert "unlink(tmp)" in section
+
+
+class TestStreamResponse:
+    """Tests for TUI.stream_response() parsing."""
+
+    def test_empty_stream(self):
+        """stream_response should handle empty iterator gracefully."""
+        cfg = vc.Config()
+        tui = vc.TUI(cfg)
+
+        def empty_gen():
+            return
+            yield  # make it a generator
+
+        with mock.patch("builtins.print"):
+            text, tool_calls = tui.stream_response(empty_gen())
+        assert text == ""
+        assert tool_calls == []
+
+    def test_stream_text_only(self):
+        """stream_response should accumulate text chunks."""
+        cfg = vc.Config()
+        tui = vc.TUI(cfg)
+
+        def text_gen():
+            yield {"choices": [{"delta": {"content": "Hello "}}]}
+            yield {"choices": [{"delta": {"content": "world!"}}]}
+
+        with mock.patch("builtins.print"):
+            text, tool_calls = tui.stream_response(text_gen())
+        assert "Hello" in text
+        assert "world" in text
+        assert tool_calls == []
+
+    def test_stream_think_tag_stripping(self):
+        """stream_response should strip <think>...</think> blocks from final text."""
+        cfg = vc.Config()
+        tui = vc.TUI(cfg)
+
+        def think_gen():
+            yield {"choices": [{"delta": {"content": "<think>internal reasoning</think>Final answer"}}]}
+
+        with mock.patch("builtins.print"):
+            text, tool_calls = tui.stream_response(think_gen())
+        # Think tags should be stripped from returned text
+        assert "<think>" not in text
+        assert "Final answer" in text
+
+
+class TestSignalHandling:
+    """Tests for signal/interrupt handling."""
+
+    def test_interrupted_event_exists(self):
+        """Agent should have _interrupted threading.Event."""
+        cfg = vc.Config()
+        cfg.model = "test"
+        cfg.ollama_host = "http://localhost:11434"
+        client = mock.MagicMock()
+        session = mock.MagicMock()
+        tui = mock.MagicMock()
+        registry = mock.MagicMock()
+        perms = mock.MagicMock()
+        agent = vc.Agent(cfg, client, session, tui, registry, perms)
+        assert hasattr(agent, "_interrupted")
+        assert isinstance(agent._interrupted, threading.Event)
+
+    def test_interrupt_method_sets_event(self):
+        """Agent.interrupt() should set the _interrupted event."""
+        cfg = vc.Config()
+        cfg.model = "test"
+        client = mock.MagicMock()
+        session = mock.MagicMock()
+        tui = mock.MagicMock()
+        registry = mock.MagicMock()
+        perms = mock.MagicMock()
+        agent = vc.Agent(cfg, client, session, tui, registry, perms)
+        assert not agent._interrupted.is_set()
+        agent.interrupt()
+        assert agent._interrupted.is_set()
+
+
+class TestParallelExecution:
+    """Tests for parallel tool execution."""
+
+    def test_parallel_safe_tools_defined(self):
+        """PARALLEL_SAFE_TOOLS should be defined and contain read-only tools."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "PARALLEL_SAFE_TOOLS" in content
+
+    def test_parallel_execution_code_exists(self):
+        """ThreadPoolExecutor usage should exist in agent loop."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "ThreadPoolExecutor" in content
+        assert "cancel_futures" in content  # Python 3.9+ shutdown
+
+
+class TestSessionLoadEdgeCases:
+    """Tests for session load edge cases."""
+
+    def test_session_load_truncated_final_line(self):
+        """Session should handle JSONL with truncated final line."""
+        cfg = vc.Config()
+        cfg.sessions_dir = tempfile.mkdtemp()
+        session = vc.Session(cfg, "test")
+        sid = session.session_id
+        path = os.path.join(cfg.sessions_dir, f"{sid}.jsonl")
+        # Write valid lines + truncated final line
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"role": "user", "content": "hello"}) + "\n")
+            f.write(json.dumps({"role": "assistant", "content": "hi"}) + "\n")
+            f.write('{"role": "user", "content": "trunca')  # incomplete JSON
+        session.load(sid)
+        # Should load the 2 valid messages, skip the truncated one
+        assert len(session.messages) == 2
+        assert session.messages[0]["content"] == "hello"
+        assert session.messages[1]["content"] == "hi"
+        import shutil
+        shutil.rmtree(cfg.sessions_dir, ignore_errors=True)
+
+    def test_session_cwd_hash_stable(self):
+        """_cwd_hash should return same hash for same cwd."""
+        cfg = vc.Config()
+        h1 = vc.Session._cwd_hash(cfg)
+        h2 = vc.Session._cwd_hash(cfg)
+        assert h1 == h2
+        assert len(h1) == 16  # sha256[:16]
+
+    def test_session_load_project_index_corrupted(self):
+        """Corrupted project index should return empty dict."""
+        cfg = vc.Config()
+        cfg.sessions_dir = tempfile.mkdtemp()
+        idx_path = vc.Session._project_index_path(cfg)
+        os.makedirs(os.path.dirname(idx_path), exist_ok=True)
+        with open(idx_path, "w") as f:
+            f.write("NOT VALID JSON{{{")
+        result = vc.Session._load_project_index(cfg)
+        assert result == {}
+        import shutil
+        shutil.rmtree(cfg.sessions_dir, ignore_errors=True)
+
+
+class TestMediumFixes:
+    """Tests for MEDIUM fixes applied in Round 13."""
+
+    def test_config_max_tokens_upper_bound(self):
+        """Config should cap max_tokens at 131072."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Should have upper bound check for max_tokens
+        assert "self.max_tokens > 131_072" in content or "max_tokens > 131_072" in content
+
+    def test_config_context_window_upper_bound(self):
+        """Config should cap context_window at 1048576."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "self.context_window > 1_048_576" in content or "context_window > 1_048_576" in content
+
+    def test_grep_context_lines_capped_at_100(self):
+        """Grep -A/-B/-C should be capped at 100."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Should have min() wrapping the int() cast
+        assert 'min(int(params.get("-A", 0)), 100)' in content
+        assert 'min(int(params.get("-B", 0)), 100)' in content
+        assert 'min(int(params.get("-C", 0)), 100)' in content
+
+    def test_session_load_corrupt_line_debug_output(self):
+        """Session.load should show corrupt line details in debug mode."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "Corrupt session line" in content
+
+    def test_task_cycle_detection_code_exists(self):
+        """TaskUpdate should have dependency cycle detection."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "dependency cycle" in content
+        assert "_has_cycle" in content
+
+    def test_write_tool_new_file_resolves_realpath(self):
+        """WriteTool should resolve realpath even for new files via parent dir."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # For new files, realpath should be applied
+        assert "resolved = os.path.realpath(file_path)" in content

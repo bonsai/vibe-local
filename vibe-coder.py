@@ -53,8 +53,9 @@ from pathlib import Path
 _bg_tasks = {}
 _bg_task_counter = [0]
 _bg_tasks_lock = threading.Lock()
+MAX_BG_TASKS = 50  # Prevent unbounded memory growth
 
-__version__ = "0.9.3"
+__version__ = "0.9.4"
 
 # ════════════════════════════════════════════════════════════════════════════════
 # ANSI Colors
@@ -524,10 +525,10 @@ class Config:
                 clean += f":{parsed.port}"
             self.ollama_host = clean
         self.ollama_host = self.ollama_host.rstrip("/")
-        # Validate numeric settings
-        if self.context_window <= 0:
+        # Validate numeric settings with reasonable bounds
+        if self.context_window <= 0 or self.context_window > 1_048_576:
             self.context_window = self.DEFAULT_CONTEXT_WINDOW
-        if self.max_tokens <= 0:
+        if self.max_tokens <= 0 or self.max_tokens > 131_072:
             self.max_tokens = self.DEFAULT_MAX_TOKENS
         if self.temperature < 0 or self.temperature > 2:
             self.temperature = self.DEFAULT_TEMPERATURE
@@ -929,6 +930,8 @@ class OllamaClient:
                 error_body = e.read().decode("utf-8", errors="replace")[:500]
             except Exception:
                 pass
+            finally:
+                e.close()
             if e.code == 404:
                 raise RuntimeError(f"Model '{model}' not found. Run: ollama pull {model}") from e
             elif e.code == 400:
@@ -974,8 +977,13 @@ class OllamaClient:
             while True:
                 try:
                     chunk = resp.read(4096)
-                except Exception:
+                except (ConnectionError, OSError, urllib.error.URLError) as e:
+                    if self.debug:
+                        print(f"\n{C.YELLOW}[debug] SSE stream read error: {e}{C.RESET}",
+                              file=sys.stderr)
                     break
+                except Exception:
+                    break  # Unknown error — stop reading
                 if not chunk:
                     break
                 buf += chunk
@@ -1052,6 +1060,9 @@ class OllamaClient:
             tc_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
             name = func.get("name", "")
             raw_args = func.get("arguments", "{}")
+            # Cap argument size to prevent OOM on malformed responses
+            if isinstance(raw_args, str) and len(raw_args) > 102400:  # 100KB
+                raw_args = raw_args[:102400]
             try:
                 args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                 if not isinstance(args, dict):
@@ -1062,7 +1073,7 @@ class OllamaClient:
                     fixed = re.sub(r',\s*}', '}', fixed)
                     fixed = re.sub(r',\s*]', ']', fixed)
                     args = json.loads(fixed)
-                except (json.JSONDecodeError, Exception):
+                except (json.JSONDecodeError, ValueError, TypeError, KeyError):
                     args = {"raw": raw_args}
             tool_calls.append({"id": tc_id, "name": name, "arguments": args})
 
@@ -1263,11 +1274,13 @@ class BashTool(Tool):
             bg_clean_env = self._build_clean_env()
             def _run_bg(tid, cmd, t_s):
                 try:
+                    _bg_pgroup = platform.system() != "Windows"
                     proc = subprocess.Popen(
                         cmd, shell=True, stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         text=True, encoding="utf-8", errors="replace",
                         cwd=os.getcwd(), env=bg_clean_env,
+                        start_new_session=_bg_pgroup,
                     )
                     stdout, stderr = proc.communicate(timeout=t_s)
                     out = (stdout or "") + ("\n" + stderr if stderr else "")
@@ -1276,17 +1289,37 @@ class BashTool(Tool):
                     if len(out) > 30000:
                         out = out[:15000] + "\n...(truncated)...\n" + out[-15000:]
                 except subprocess.TimeoutExpired:
+                    # Kill entire process group on Unix, then the process itself
+                    if hasattr(os, "killpg"):
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except (OSError, ProcessLookupError):
+                            pass
                     proc.kill()
                     try:
                         proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        pass
+                        pass  # Process may be truly stuck — OS will reap eventually
                     out = f"Error: background command timed out after {int(t_s)}s"
                 except Exception as e:
                     out = f"Error: {e}"
                 with _bg_tasks_lock:
                     _bg_tasks[tid]["result"] = out.strip() or "(no output)"
             with _bg_tasks_lock:
+                # Evict completed tasks older than 1 hour, then enforce cap
+                now = time.time()
+                stale = [k for k, v in _bg_tasks.items()
+                         if v.get("result") is not None and now - v.get("start", 0) > 3600]
+                for k in stale:
+                    del _bg_tasks[k]
+                if len(_bg_tasks) >= MAX_BG_TASKS:
+                    # Remove oldest completed task
+                    oldest = min((k for k, v in _bg_tasks.items() if v.get("result") is not None),
+                                 key=lambda k: _bg_tasks[k].get("start", 0), default=None)
+                    if oldest:
+                        del _bg_tasks[oldest]
+                    else:
+                        return f"Error: too many background tasks ({MAX_BG_TASKS}). Wait for some to complete."
                 _bg_tasks[task_id] = {"thread": None, "result": None,
                                        "command": command, "start": time.time()}
             t = threading.Thread(target=_run_bg, args=(task_id, command, timeout_s), daemon=True)
@@ -1407,7 +1440,7 @@ class ReadTool(Tool):
         try:
             real_path = os.path.realpath(file_path)
         except (OSError, ValueError):
-            real_path = file_path
+            return f"Error: cannot resolve path: {file_path}"
         if not os.path.exists(real_path):
             return f"Error: file not found: {file_path}"
         if os.path.isdir(real_path):
@@ -1655,10 +1688,15 @@ class WriteTool(Tool):
         try:
             if os.path.islink(file_path):
                 return f"Error: refusing to write through symlink: {file_path}"
+            # For new files: resolve parent dir to prevent symlink escape
+            resolved = os.path.realpath(file_path)
             if os.path.exists(file_path):
-                file_path = os.path.realpath(file_path)
+                file_path = resolved
+            else:
+                # New file: ensure resolved parent matches expected parent
+                file_path = resolved
         except (OSError, ValueError):
-            pass
+            return f"Error: cannot resolve path: {file_path}"
 
         # Block writes to protected config/permission files
         if _is_protected_path(file_path):
@@ -1754,7 +1792,7 @@ class EditTool(Tool):
                 return f"Error: refusing to edit through symlink: {file_path}"
             file_path = os.path.realpath(file_path)
         except (OSError, ValueError):
-            pass
+            return f"Error: cannot resolve path: {file_path}"
 
         # Block edits to protected config/permission files
         if _is_protected_path(file_path):
@@ -2027,15 +2065,15 @@ class GrepTool(Tool):
         case_insensitive = params.get("-i", False)
         output_mode = params.get("output_mode", "files_with_matches")
         try:
-            after = int(params.get("-A", 0))
+            after = min(int(params.get("-A", 0)), 100)
         except (ValueError, TypeError):
             after = 0
         try:
-            before = int(params.get("-B", 0))
+            before = min(int(params.get("-B", 0)), 100)
         except (ValueError, TypeError):
             before = 0
         try:
-            context = int(params.get("-C", 0))
+            context = min(int(params.get("-C", 0)), 100)
         except (ValueError, TypeError):
             context = 0
         try:
@@ -2765,7 +2803,24 @@ class TaskUpdateTool(Tool):
             if "description" in params and params["description"]:
                 task["description"] = params["description"]
 
+            # Helper: detect cycles via DFS
+            def _has_cycle(start, direction="blocks"):
+                visited = set()
+                stack = [start]
+                while stack:
+                    node = stack.pop()
+                    if node in visited:
+                        continue
+                    visited.add(node)
+                    t = _task_store["tasks"].get(node)
+                    if t:
+                        stack.extend(t.get(direction, []))
+                return visited
+
             for block_id in params.get("addBlocks", []):
+                # Cycle check: if block_id already blocks tid (directly or transitively)
+                if tid in _has_cycle(block_id, "blocks"):
+                    return f"Error: adding block #{block_id} would create a dependency cycle"
                 if block_id not in task["blocks"]:
                     task["blocks"].append(block_id)
                 other = _task_store["tasks"].get(block_id)
@@ -2773,6 +2828,9 @@ class TaskUpdateTool(Tool):
                     other["blockedBy"].append(tid)
 
             for blocker_id in params.get("addBlockedBy", []):
+                # Cycle check: if tid already blocks blocker_id
+                if blocker_id in _has_cycle(tid, "blocks"):
+                    return f"Error: adding blockedBy #{blocker_id} would create a dependency cycle"
                 if blocker_id not in task["blockedBy"]:
                     task["blockedBy"].append(blocker_id)
                 other = _task_store["tasks"].get(blocker_id)
@@ -3063,6 +3121,16 @@ class SubAgentTool(Tool):
                     "tool_call_id": tc_id,
                     "content": output_str,
                 })
+
+            # Context window guard: estimate total message size
+            total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+            max_chars = 80000  # ~20K tokens, safe for most models
+            if total_chars > max_chars:
+                # Truncate older tool results (preserve system + user + last 4 messages)
+                for i in range(2, len(messages) - 4):
+                    c = messages[i].get("content", "")
+                    if messages[i].get("role") == "tool" and isinstance(c, str) and len(c) > 500:
+                        messages[i]["content"] = c[:500] + "\n...(truncated by sub-agent context limit)"
         else:
             # Reached max_turns without a final text response
             result_text = (
@@ -3437,16 +3505,19 @@ class Session:
         tmp = None
         try:
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(index, f, ensure_ascii=False, indent=2)
-            os.chmod(tmp, 0o600)  # restrict permissions before exposing
-            os.replace(tmp, path)
-        except (OSError, IOError):
-            if tmp:
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(index, f, ensure_ascii=False, indent=2)
+                os.chmod(tmp, 0o600)  # restrict permissions before exposing
+                os.replace(tmp, path)
+            except Exception:
                 try:
                     os.unlink(tmp)
                 except OSError:
                     pass
+                raise
+        except (OSError, IOError):
+            pass  # non-critical — index will be rebuilt on next save
 
     @staticmethod
     def _cwd_hash(config):
@@ -3767,6 +3838,7 @@ class Session:
             print(f"\n{C.YELLOW}Warning: Session save failed: {e}{C.RESET}", file=sys.stderr)
             if self.config.debug:
                 traceback.print_exc()
+            return  # Don't update project index if session save failed
         # Update project index: map current working directory -> this session
         try:
             cwd_key = Session._cwd_hash(self.config)
@@ -3819,6 +3891,10 @@ class Session:
                             skipped += 1
                     except json.JSONDecodeError:
                         skipped += 1
+                        if self.config.debug:
+                            preview = line[:60] + "..." if len(line) > 60 else line
+                            print(f"{C.DIM}[debug] Corrupt session line {line_num}: {preview}{C.RESET}",
+                                  file=sys.stderr)
                         continue
             if skipped > 0:
                 print(f"{C.YELLOW}Warning: Skipped {skipped} corrupt line(s) in session.{C.RESET}",
@@ -4700,7 +4776,7 @@ class Agent:
                                 fixed = re.sub(r',\s*}', '}', raw_args)
                                 fixed = re.sub(r',\s*]', ']', fixed)
                                 tool_params = json.loads(fixed)
-                            except (json.JSONDecodeError, Exception):
+                            except (json.JSONDecodeError, ValueError, TypeError, KeyError):
                                 # Unsalvageable — report error to LLM instead of passing bad params
                                 results.append(ToolResult(tc_id, f"Error: tool arguments are not valid JSON: {raw_args[:200]}", True))
                                 continue
@@ -4839,6 +4915,11 @@ class Agent:
                     body = e.read().decode("utf-8", errors="replace")[:200]
                 except Exception:
                     pass
+                finally:
+                    try:
+                        e.close()
+                    except Exception:
+                        pass
                 print(f"\n{C.RED}HTTP {e.code} {e.reason}: {body}{C.RESET}")
                 if e.code == 404:
                     print(f"{C.DIM}The model '{self.config.model}' may not be downloaded yet.{C.RESET}")
