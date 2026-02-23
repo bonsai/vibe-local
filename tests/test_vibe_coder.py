@@ -4859,7 +4859,7 @@ class TestTokenUsageDisplay:
 
     def test_version_bump(self):
         """Verify version was bumped for this feature release."""
-        assert vc.__version__ == "1.0.1"
+        assert vc.__version__ == "1.1.0"
 
     def test_bash_tool_has_run_in_background_param(self):
         tool = vc.BashTool()
@@ -7470,3 +7470,250 @@ class TestNewFeatureIntegration:
         assert "_load_mcp_servers" in content
         assert "MCPClient" in content
         assert "mcp.initialize()" in content
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v1.1: File Watcher, Streaming Enhancement, Multi-Agent Coordination
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestFileWatcher:
+    """Tests for the FileWatcher class."""
+
+    def test_init_disabled(self, tmp_path):
+        """FileWatcher should be disabled by default."""
+        fw = vc.FileWatcher(str(tmp_path))
+        assert fw.enabled is False
+
+    def test_scan_finds_files(self, tmp_path):
+        """_scan should find watched file types."""
+        (tmp_path / "app.py").write_text("x = 1")
+        (tmp_path / "index.html").write_text("<html>")
+        (tmp_path / "data.bin").write_bytes(b"\x00\x01")  # not watched
+        fw = vc.FileWatcher(str(tmp_path))
+        snap = fw._scan()
+        paths = set(snap.keys())
+        assert any("app.py" in p for p in paths)
+        assert any("index.html" in p for p in paths)
+        assert not any("data.bin" in p for p in paths)
+
+    def test_scan_skips_git(self, tmp_path):
+        """_scan should skip .git and node_modules."""
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config.py").write_text("x")
+        nm_dir = tmp_path / "node_modules"
+        nm_dir.mkdir()
+        (nm_dir / "pkg.js").write_text("y")
+        (tmp_path / "main.py").write_text("z")
+        fw = vc.FileWatcher(str(tmp_path))
+        snap = fw._scan()
+        paths_str = " ".join(snap.keys())
+        assert ".git" not in paths_str
+        assert "node_modules" not in paths_str
+        assert "main.py" in paths_str
+
+    def test_detect_changes_created(self, tmp_path):
+        """Should detect newly created files."""
+        fw = vc.FileWatcher(str(tmp_path))
+        old = {}
+        new = {str(tmp_path / "new.py"): (time.time(), 10)}
+        changes = fw._detect_changes(old, new)
+        assert len(changes) == 1
+        assert changes[0][0] == "created"
+
+    def test_detect_changes_modified(self, tmp_path):
+        """Should detect modified files."""
+        fw = vc.FileWatcher(str(tmp_path))
+        p = str(tmp_path / "mod.py")
+        old = {p: (1000.0, 50)}
+        new = {p: (2000.0, 60)}
+        changes = fw._detect_changes(old, new)
+        assert len(changes) == 1
+        assert changes[0][0] == "modified"
+
+    def test_detect_changes_deleted(self, tmp_path):
+        """Should detect deleted files."""
+        fw = vc.FileWatcher(str(tmp_path))
+        p = str(tmp_path / "del.py")
+        old = {p: (1000.0, 50)}
+        new = {}
+        changes = fw._detect_changes(old, new)
+        assert len(changes) == 1
+        assert changes[0][0] == "deleted"
+
+    def test_format_changes(self, tmp_path):
+        """format_changes should produce readable output."""
+        fw = vc.FileWatcher(str(tmp_path))
+        changes = [
+            ("created", str(tmp_path / "new.py")),
+            ("modified", str(tmp_path / "old.py")),
+            ("deleted", str(tmp_path / "gone.py")),
+        ]
+        msg = fw.format_changes(changes)
+        assert "File Watcher" in msg
+        assert "+ new.py" in msg
+        assert "~ old.py" in msg
+        assert "- gone.py" in msg
+
+    def test_format_changes_empty(self, tmp_path):
+        """format_changes with empty list returns empty string."""
+        fw = vc.FileWatcher(str(tmp_path))
+        assert fw.format_changes([]) == ""
+
+    def test_start_stop(self, tmp_path):
+        """start/stop should enable/disable watcher."""
+        fw = vc.FileWatcher(str(tmp_path))
+        fw.start()
+        assert fw.enabled is True
+        assert fw._thread is not None
+        fw.stop()
+        assert fw.enabled is False
+
+    def test_get_pending_changes_clears(self, tmp_path):
+        """get_pending_changes should return and clear pending changes."""
+        fw = vc.FileWatcher(str(tmp_path))
+        fw._changes = [("created", "a.py"), ("modified", "b.py")]
+        result = fw.get_pending_changes()
+        assert len(result) == 2
+        assert fw.get_pending_changes() == []  # cleared
+
+    def test_refresh_snapshot(self, tmp_path):
+        """refresh_snapshot should update snapshot."""
+        (tmp_path / "test.py").write_text("x = 1")
+        fw = vc.FileWatcher(str(tmp_path))
+        fw._snapshots = {}
+        fw.refresh_snapshot()
+        assert len(fw._snapshots) > 0
+
+    def test_real_change_detection(self, tmp_path):
+        """End-to-end: detect a file creation after snapshot."""
+        fw = vc.FileWatcher(str(tmp_path))
+        fw._snapshots = fw._scan()  # initial scan (empty)
+        # Create a file
+        (tmp_path / "new_file.py").write_text("hello")
+        new_snap = fw._scan()
+        changes = fw._detect_changes(fw._snapshots, new_snap)
+        assert any(c[0] == "created" and "new_file.py" in c[1] for c in changes)
+
+
+class TestMultiAgentCoordinator:
+    """Tests for MultiAgentCoordinator and ParallelAgentTool."""
+
+    def test_coordinator_max_parallel(self):
+        """MAX_PARALLEL should be 4."""
+        assert vc.MultiAgentCoordinator.MAX_PARALLEL == 4
+
+    def test_parallel_agent_tool_schema(self):
+        """ParallelAgentTool should have proper schema."""
+        coord = mock.MagicMock()
+        tool = vc.ParallelAgentTool(coord)
+        assert tool.name == "ParallelAgents"
+        schema = tool.get_schema()
+        assert schema["type"] == "function"
+        props = schema["function"]["parameters"]["properties"]
+        assert "tasks" in props
+        assert props["tasks"]["type"] == "array"
+
+    def test_parallel_agent_tool_empty_tasks(self):
+        """ParallelAgentTool with empty tasks should error."""
+        coord = mock.MagicMock()
+        tool = vc.ParallelAgentTool(coord)
+        result = tool.execute({"tasks": []})
+        assert "Error" in result
+
+    def test_parallel_agent_tool_caps_at_4(self):
+        """ParallelAgentTool should cap at 4 tasks."""
+        coord = mock.MagicMock()
+        coord.run_parallel.return_value = [
+            {"prompt": f"task {i}", "result": f"done {i}", "duration": 1.0, "error": None}
+            for i in range(4)
+        ]
+        tool = vc.ParallelAgentTool(coord)
+        tasks = [{"prompt": f"task {i}"} for i in range(6)]
+        tool.execute({"tasks": tasks})
+        # Should only pass 4 tasks to coordinator
+        call_args = coord.run_parallel.call_args[0][0]
+        assert len(call_args) == 4
+
+    def test_coordinator_code_exists(self):
+        """MultiAgentCoordinator should be in source."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "class MultiAgentCoordinator" in content
+        assert "run_parallel" in content
+        assert "class ParallelAgentTool" in content
+
+
+class TestStreamingEnhancement:
+    """Tests for enhanced streaming with tool call support."""
+
+    def test_stream_response_accumulates_tool_calls(self):
+        """stream_response should accumulate tool_call deltas."""
+        tui = vc.TUI.__new__(vc.TUI)
+        tui._is_cjk = False
+        tui._term_cols = 80
+        tui._term_rows = 24
+        tui._no_color = True
+
+        # Simulate streaming chunks with tool call deltas
+        chunks = [
+            {"choices": [{"delta": {"content": "I'll search for that. "}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_abc", "function": {"name": "Grep", "arguments": ""}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"patt'}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'ern": "TODO"}'}}]}}]},
+            {"choices": [{"delta": {}}]},
+        ]
+        text, tool_calls = tui.stream_response(iter(chunks))
+        assert "search" in text
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"]["name"] == "Grep"
+        assert '"pattern": "TODO"' in tool_calls[0]["function"]["arguments"]
+
+    def test_stream_response_no_tools(self):
+        """stream_response with text-only should return empty tool_calls."""
+        tui = vc.TUI.__new__(vc.TUI)
+        tui._is_cjk = False
+        tui._term_cols = 80
+        tui._term_rows = 24
+        tui._no_color = True
+
+        chunks = [
+            {"choices": [{"delta": {"content": "Hello "}}]},
+            {"choices": [{"delta": {"content": "world!"}}]},
+        ]
+        text, tool_calls = tui.stream_response(iter(chunks))
+        assert "Hello world!" in text
+        assert tool_calls == []
+
+    def test_supports_tool_streaming_flag(self):
+        """OllamaClient should have _supports_tool_streaming flag."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        assert hasattr(client, "_supports_tool_streaming")
+
+    def test_file_watcher_in_agent(self):
+        """Agent should have file_watcher attribute."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "self.file_watcher = FileWatcher" in content
+
+    def test_watch_command_in_slash_commands(self):
+        """Watch command should be registered."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert '"/watch"' in content
+        assert 'cmd == "/watch"' in content
+
+    def test_parallel_agents_registered(self):
+        """ParallelAgentTool should be registered in main."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "ParallelAgentTool(coordinator)" in content
+        assert "MultiAgentCoordinator(config, client, registry, permissions)" in content
+
+    def test_session_add_system_note(self):
+        """Session should have add_system_note method."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "def add_system_note" in content

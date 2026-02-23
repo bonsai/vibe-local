@@ -55,7 +55,7 @@ _bg_task_counter = [0]
 _bg_tasks_lock = threading.Lock()
 MAX_BG_TASKS = 50  # Prevent unbounded memory growth
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 # ════════════════════════════════════════════════════════════════════════════════
 # ANSI Colors
@@ -799,6 +799,7 @@ class OllamaClient:
         self.context_window = config.context_window
         self.debug = config.debug
         self.timeout = 300
+        self._supports_tool_streaming = False  # auto-detected on first tool+stream call
 
     def check_connection(self, retries=3):
         """Check if Ollama is reachable. Returns (ok, model_list)."""
@@ -904,10 +905,12 @@ class OllamaClient:
             payload["tool_choice"] = "auto"
             # Lower temperature for tool-calling (improves JSON reliability)
             payload["temperature"] = min(self.temperature, 0.3)
-            # Force non-streaming for tool use (Ollama limitation)
-            if stream:
-                payload["stream"] = False
-                stream = False
+            # Try streaming with tools (Ollama 0.5+ supports this)
+            # Falls back to sync in the caller if streaming fails
+            if not self._supports_tool_streaming:
+                if stream:
+                    payload["stream"] = False
+                    stream = False
 
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -3506,6 +3509,256 @@ class AutoTestRunner:
 
 
 # ════════════════════════════════════════════════════════════════════════════════
+# File Watcher — poll-based file change detection (stdlib only)
+# ════════════════════════════════════════════════════════════════════════════════
+
+class FileWatcher:
+    """Watches project files for external changes using mtime polling."""
+
+    # Default patterns to watch
+    WATCH_EXTENSIONS = frozenset({
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".json",
+        ".yaml", ".yml", ".toml", ".md", ".txt", ".sh", ".sql", ".go",
+        ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".rb", ".php",
+    })
+    # Directories to skip
+    SKIP_DIRS = frozenset({
+        ".git", "node_modules", "__pycache__", ".venv", "venv", ".tox",
+        "dist", "build", ".next", ".cache", "target", ".idea", ".vscode",
+    })
+    MAX_FILES = 5000  # Don't track more than this many files
+    POLL_INTERVAL = 2.0  # seconds between polls
+
+    def __init__(self, cwd):
+        self.cwd = cwd
+        self.enabled = False
+        self._snapshots = {}  # path -> (mtime, size)
+        self._changes = []  # list of (type, path) pending changes
+        self._lock = threading.Lock()
+        self._thread = None
+        self._stop_event = threading.Event()
+
+    def _scan(self):
+        """Scan project files and return {path: (mtime, size)} dict."""
+        result = {}
+        count = 0
+        for root, dirs, files in os.walk(self.cwd):
+            # Skip unwanted directories
+            dirs[:] = [d for d in dirs if d not in self.SKIP_DIRS and not d.startswith(".")]
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in self.WATCH_EXTENSIONS:
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    st = os.stat(fpath)
+                    result[fpath] = (st.st_mtime, st.st_size)
+                except OSError:
+                    pass
+                count += 1
+                if count >= self.MAX_FILES:
+                    return result
+        return result
+
+    def _detect_changes(self, old, new):
+        """Compare two snapshots and return list of (type, path) changes."""
+        changes = []
+        for path, (mtime, size) in new.items():
+            if path not in old:
+                changes.append(("created", path))
+            elif old[path] != (mtime, size):
+                changes.append(("modified", path))
+        for path in old:
+            if path not in new:
+                changes.append(("deleted", path))
+        return changes
+
+    def start(self):
+        """Start background polling thread."""
+        if self._thread and self._thread.is_alive():
+            return
+        self.enabled = True
+        self._stop_event.clear()
+        self._snapshots = self._scan()
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Stop background polling."""
+        self.enabled = False
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def _poll_loop(self):
+        """Background polling loop."""
+        while not self._stop_event.is_set():
+            self._stop_event.wait(self.POLL_INTERVAL)
+            if self._stop_event.is_set():
+                break
+            try:
+                new_snap = self._scan()
+                changes = self._detect_changes(self._snapshots, new_snap)
+                if changes:
+                    with self._lock:
+                        self._changes.extend(changes)
+                    self._snapshots = new_snap
+            except Exception:
+                pass
+
+    def get_pending_changes(self):
+        """Get and clear pending file changes. Returns list of (type, path)."""
+        with self._lock:
+            changes = self._changes[:]
+            self._changes.clear()
+        return changes
+
+    def format_changes(self, changes):
+        """Format changes into a human-readable string for LLM injection."""
+        if not changes:
+            return ""
+        lines = ["[File Watcher] External file changes detected:"]
+        icons = {"created": "+", "modified": "~", "deleted": "-"}
+        for ctype, cpath in changes[:20]:  # cap at 20
+            relpath = os.path.relpath(cpath, self.cwd)
+            lines.append(f"  {icons.get(ctype, '?')} {relpath} ({ctype})")
+        if len(changes) > 20:
+            lines.append(f"  ... and {len(changes) - 20} more")
+        return "\n".join(lines)
+
+    def refresh_snapshot(self):
+        """Force refresh the snapshot (call after our own writes)."""
+        try:
+            self._snapshots = self._scan()
+        except Exception:
+            pass
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Multi-Agent Coordinator — parallel agent execution
+# ════════════════════════════════════════════════════════════════════════════════
+
+class MultiAgentCoordinator:
+    """Coordinates multiple sub-agents running in parallel."""
+
+    MAX_PARALLEL = 4  # max concurrent agents
+
+    def __init__(self, config, client, registry, permissions):
+        self._config = config
+        self._client = client
+        self._registry = registry
+        self._permissions = permissions
+
+    def run_parallel(self, tasks):
+        """Run multiple sub-agent tasks in parallel.
+
+        Args:
+            tasks: list of {"prompt": str, "max_turns": int, "allow_writes": bool}
+
+        Returns:
+            list of {"prompt": str, "result": str, "duration": float, "error": str|None}
+        """
+        tasks = tasks[:self.MAX_PARALLEL]
+        results = [None] * len(tasks)
+
+        def _run_one(idx, task):
+            start = time.time()
+            try:
+                sub = SubAgentTool(self._config, self._client, self._registry, self._permissions)
+                result = sub.execute(task)
+                results[idx] = {
+                    "prompt": task.get("prompt", "")[:100],
+                    "result": result,
+                    "duration": time.time() - start,
+                    "error": None,
+                }
+            except Exception as e:
+                results[idx] = {
+                    "prompt": task.get("prompt", "")[:100],
+                    "result": "",
+                    "duration": time.time() - start,
+                    "error": str(e),
+                }
+
+        threads = []
+        for i, task in enumerate(tasks):
+            t = threading.Thread(target=_run_one, args=(i, task), daemon=True)
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join(timeout=300)  # 5 min max per agent
+
+        return [r for r in results if r is not None]
+
+
+class ParallelAgentTool(Tool):
+    """Launch multiple sub-agents in parallel to handle independent tasks."""
+    name = "ParallelAgents"
+    description = (
+        "Launch 2-4 sub-agents in parallel, each handling an independent task. "
+        "Each agent runs its own tool loop. Use when you have multiple independent "
+        "research or analysis tasks that can run simultaneously. "
+        "Returns all results when all agents complete."
+    )
+
+    def __init__(self, coordinator):
+        self._coordinator = coordinator
+
+    @property
+    def parameters(self):
+        return {
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "description": "Array of task objects, each with 'prompt' (required) and optional 'max_turns' (default 10) and 'allow_writes' (default false)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "description": "Task for this agent"},
+                            "max_turns": {"type": "integer", "description": "Max turns (default 10)"},
+                            "allow_writes": {"type": "boolean", "description": "Allow write tools"},
+                        },
+                        "required": ["prompt"],
+                    },
+                    "minItems": 1,
+                    "maxItems": 4,
+                },
+            },
+            "required": ["tasks"],
+        }
+
+    def execute(self, params):
+        tasks = params.get("tasks", [])
+        if not tasks:
+            return "Error: at least one task is required"
+        if len(tasks) > 4:
+            tasks = tasks[:4]
+
+        with _print_lock:
+            print(f"\n  {_ansi(chr(27)+'[38;5;141m')}🤖 Launching {len(tasks)} parallel agents...{C.RESET}",
+                  flush=True)
+
+        results = self._coordinator.run_parallel(tasks)
+
+        output_parts = []
+        for i, r in enumerate(results):
+            header = f"━━ Agent {i+1}: {r['prompt'][:60]}"
+            if r["error"]:
+                output_parts.append(f"{header}\nError: {r['error']}")
+            else:
+                output_parts.append(f"{header} ({r['duration']:.1f}s)\n{r['result']}")
+
+        with _print_lock:
+            print(f"  {_ansi(chr(27)+'[38;5;141m')}🤖 All {len(results)} agents finished.{C.RESET}",
+                  flush=True)
+
+        return "\n\n".join(output_parts)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
 # Tool Registry
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -3949,6 +4202,11 @@ class Session:
         self._token_estimate += self._estimate_tokens(text)
         self._enforce_max_messages()
 
+    def add_system_note(self, text):
+        """Add a system-level note (e.g., file watcher changes) as a user message."""
+        self.messages.append({"role": "user", "content": f"[System Note] {text}"})
+        self._token_estimate += self._estimate_tokens(text)
+
     def add_assistant_message(self, text, tool_calls=None):
         msg = {"role": "assistant", "content": text if text else None}
         if tool_calls:
@@ -4323,7 +4581,7 @@ class TUI:
                     "/status", "/save", "/compact", "/yes", "/no", "/tokens",
                     "/commit", "/diff", "/git", "/plan", "/approve", "/act",
                     "/execute", "/undo", "/init", "/config", "/debug",
-                    "/checkpoint", "/rollback", "/autotest", "/skills",
+                    "/checkpoint", "/rollback", "/autotest", "/watch", "/skills",
                 ]
                 def _completer(text, state):
                     if text.startswith("/"):
@@ -4522,14 +4780,36 @@ class TUI:
         return first_line
 
     def stream_response(self, response_iter):
-        """Stream LLM response to terminal. Returns (text, tool_calls)."""
+        """Stream LLM response to terminal. Returns (text, tool_calls).
+
+        Handles both text content and tool_call deltas from streaming responses.
+        Tool calls are accumulated from delta chunks (OpenAI-compatible format).
+        """
         raw_parts = []
         in_think = False
         think_buf = ""    # buffer to detect <think> / </think> split across chunks
         header_printed = False
+        # Accumulate tool_call deltas: {index: {"id": ..., "name": ..., "arguments": ...}}
+        _tc_accum = {}
 
         for chunk in response_iter:
-            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            choice = chunk.get("choices", [{}])[0]
+            delta = choice.get("delta", {})
+
+            # Accumulate tool call deltas (streamed tool calling)
+            for tc_delta in delta.get("tool_calls", []):
+                tc_idx = tc_delta.get("index", 0)
+                if tc_idx not in _tc_accum:
+                    _tc_accum[tc_idx] = {"id": "", "function": {"name": "", "arguments": ""}}
+                acc = _tc_accum[tc_idx]
+                if "id" in tc_delta and tc_delta["id"]:
+                    acc["id"] = tc_delta["id"]
+                func_delta = tc_delta.get("function", {})
+                if func_delta.get("name"):
+                    acc["function"]["name"] += func_delta["name"]
+                if func_delta.get("arguments"):
+                    acc["function"]["arguments"] += func_delta["arguments"]
+
             content = delta.get("content", "")
             if not content:
                 continue
@@ -4590,7 +4870,21 @@ class TUI:
         # Strip <think>...</think> from final text for history
         full_text = re.sub(r'<think>[\s\S]*?</think>', '', full_text).strip()
         print()  # newline
-        return full_text, []
+
+        # Build tool_calls list from accumulated deltas
+        streamed_tool_calls = []
+        for idx in sorted(_tc_accum.keys()):
+            tc = _tc_accum[idx]
+            if tc["function"]["name"]:
+                streamed_tool_calls.append({
+                    "id": tc["id"] or f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": tc["function"]["name"],
+                        "arguments": tc["function"]["arguments"],
+                    },
+                })
+        return full_text, streamed_tool_calls
 
     def show_sync_response(self, data, known_tools=None):
         """Display a sync (non-streaming) response. Returns (text, tool_calls)."""
@@ -4910,6 +5204,7 @@ class TUI:
   {_c198}/rollback{C.RESET}          Rollback to last checkpoint
   {_c51}━━ Extensions {sep[13:]}{C.RESET}
   {_c198}/autotest{C.RESET}          Toggle auto lint+test after edits
+  {_c198}/watch{C.RESET}             Toggle file watcher
   {_c198}/skills{C.RESET}            List loaded skills
   {_c51}━━ Keyboard {sep[11:]}{C.RESET}
   {_c198}Ctrl+C{C.RESET}             Stop current task
@@ -4928,7 +5223,7 @@ class TUI:
   {_c87}Bash, Read, Write, Edit, Glob, Grep,{C.RESET}
   {_c87}WebFetch, WebSearch, NotebookEdit,{C.RESET}
   {_c87}TaskCreate/List/Get/Update, SubAgent,{C.RESET}
-  {_c87}AskUserQuestion{C.RESET}
+  {_c87}ParallelAgents, AskUserQuestion{C.RESET}
   {_c51}{sep}{C.RESET}{ime_hint}
 """)
 
@@ -4991,6 +5286,7 @@ class Agent:
         self._plan_mode = False
         self.git_checkpoint = GitCheckpoint(config.cwd)
         self.auto_test = AutoTestRunner(config.cwd)
+        self.file_watcher = FileWatcher(config.cwd)
 
     def run(self, user_input):
         """Run the agent loop for a single user request."""
@@ -5006,6 +5302,14 @@ class Agent:
 
             text = ""
             try:
+                # 0. Inject file watcher changes (if any)
+                if self.file_watcher.enabled and iteration == 0:
+                    fw_changes = self.file_watcher.get_pending_changes()
+                    if fw_changes:
+                        fw_msg = self.file_watcher.format_changes(fw_changes)
+                        self.session.add_system_note(fw_msg)
+                        print(f"\n  {_ansi(chr(27)+'[38;5;226m')}👁 {len(fw_changes)} file change(s) detected{C.RESET}")
+
                 # 1. Call Ollama (with retry for malformed responses)
                 tools = self.registry.get_schemas()
                 # In plan mode, only allow read-only tools
@@ -5028,7 +5332,7 @@ class Agent:
                             model=self.config.model,
                             messages=self.session.get_messages(),
                             tools=tools if tools else None,
-                            stream=not bool(tools),  # stream only when no tools
+                            stream=True,  # always try streaming (text + tool calls)
                         )
                         break
                     except (RuntimeError, urllib.error.URLError) as e:
@@ -5229,6 +5533,10 @@ class Agent:
                                 self.tui.stop_spinner()
                             self.tui.show_tool_result(tool_name, output)
                             results.append(ToolResult(tc_id, output))
+
+                            # Refresh file watcher snapshot after writes
+                            if tool_name in ("Write", "Edit") and self.file_watcher.enabled:
+                                self.file_watcher.refresh_snapshot()
 
                             # Auto test after Write/Edit
                             if tool_name in ("Write", "Edit") and self.auto_test.enabled:
@@ -5480,6 +5788,8 @@ def main():
     registry = ToolRegistry().register_defaults()
     permissions = PermissionMgr(config)
     registry.register(SubAgentTool(config, client, registry, permissions))
+    coordinator = MultiAgentCoordinator(config, client, registry, permissions)
+    registry.register(ParallelAgentTool(coordinator))
 
     # Initialize MCP servers
     _mcp_clients = []
@@ -5994,6 +6304,18 @@ def main():
                             print(f"  {C.DIM}No test command detected. Tests will only run syntax checks.{C.RESET}")
                     continue
 
+                # ── File watcher toggle ───────────────────────────────
+                elif cmd == "/watch":
+                    if agent.file_watcher.enabled:
+                        agent.file_watcher.stop()
+                        print(f"  File watcher: {C.RED}OFF{C.RESET}")
+                    else:
+                        agent.file_watcher.start()
+                        n = len(agent.file_watcher._snapshots)
+                        print(f"  File watcher: {C.GREEN}ON{C.RESET}")
+                        print(f"  {C.DIM}Tracking {n} files. External changes will be reported to the AI.{C.RESET}")
+                    continue
+
                 # ── Skills list ───────────────────────────────────────
                 elif cmd == "/skills":
                     loaded_skills = _load_skills(config)
@@ -6127,6 +6449,11 @@ def main():
             readline.write_history_file(config.history_file)
         except Exception:
             pass
+    # Cleanup file watcher
+    try:
+        agent.file_watcher.stop()
+    except Exception:
+        pass
     # Cleanup MCP server subprocesses
     for mcp in _mcp_clients:
         try:
