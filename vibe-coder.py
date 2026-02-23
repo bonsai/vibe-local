@@ -3039,10 +3039,13 @@ class SubAgentTool(Tool):
         if allow_writes:
             allowed_tools |= self.WRITE_TOOLS
 
-        # Print minimal status
+        # Print minimal status (with optional agent label for parallel runs)
+        agent_label = params.get("_agent_label", "")
+        label_str = f" [{agent_label}]" if agent_label else ""
         prompt_preview = prompt[:80] + ("..." if len(prompt) > 80 else "")
+        _sub_start = time.time()
         with _print_lock:
-            print(f"\n  {_ansi(chr(27)+'[38;5;141m')}🤖 Sub-agent working on: {prompt_preview}{C.RESET}",
+            print(f"\n  {_ansi(chr(27)+'[38;5;141m')}🤖{label_str} Sub-agent working on: {prompt_preview}{C.RESET}",
                   flush=True)
 
         # Build tool schemas for the sub-agent (only allowed tools)
@@ -3190,8 +3193,9 @@ class SubAgentTool(Tool):
                 f"Last response: {last_text[:2000]}"
             )
 
+        _sub_elapsed = time.time() - _sub_start
         with _print_lock:
-            print(f"  {_ansi(chr(27)+'[38;5;141m')}🤖 Sub-agent finished.{C.RESET}",
+            print(f"  {_ansi(chr(27)+'[38;5;141m')}🤖{label_str} Sub-agent finished ({_sub_elapsed:.1f}s){C.RESET}",
                   flush=True)
 
         # Truncate final result to prevent bloating parent context
@@ -3709,13 +3713,18 @@ class MultiAgentCoordinator:
             list of {"prompt": str, "result": str, "duration": float, "error": str|None}
         """
         tasks = tasks[:self.MAX_PARALLEL]
-        results = [None] * len(tasks)
+        total = len(tasks)
+        results = [None] * total
+        _done_count = [0]  # mutable for closure
 
         def _run_one(idx, task):
             start = time.time()
             try:
+                # Inject agent label for UI display
+                labeled_task = dict(task)
+                labeled_task["_agent_label"] = f"Agent {idx + 1}/{total}"
                 sub = SubAgentTool(self._config, self._client, self._registry, self._permissions)
-                result = sub.execute(task)
+                result = sub.execute(labeled_task)
                 results[idx] = {
                     "prompt": task.get("prompt", "")[:100],
                     "result": result,
@@ -3729,6 +3738,23 @@ class MultiAgentCoordinator:
                     "duration": time.time() - start,
                     "error": str(e),
                 }
+            _done_count[0] += 1
+
+        # Heartbeat thread: show progress every 10 seconds
+        _heartbeat_stop = threading.Event()
+
+        def _heartbeat():
+            _hb_start = time.time()
+            while not _heartbeat_stop.wait(10):
+                elapsed = time.time() - _hb_start
+                done = _done_count[0]
+                with _print_lock:
+                    print(f"  {_ansi(chr(27)+'[38;5;226m')}⏳ Parallel agents: "
+                          f"{done}/{total} done, {elapsed:.0f}s elapsed...{C.RESET}",
+                          flush=True)
+
+        hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+        hb_thread.start()
 
         threads = []
         for i, task in enumerate(tasks):
@@ -3738,6 +3764,9 @@ class MultiAgentCoordinator:
 
         for t in threads:
             t.join(timeout=300)  # 5 min max per agent
+
+        _heartbeat_stop.set()
+        hb_thread.join(timeout=2)
 
         # Mark timed-out agents
         for i, r in enumerate(results):
