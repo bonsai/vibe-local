@@ -1,4 +1,4 @@
-# v1.3.1 — DECSTBM Scroll Region (Fixed Footer)
+# v1.3.2 — DECSTBM Scroll Region, PowerShell Fix
 
 > **Fixed footer display** — Separator, status line, and hint bar now stay pinned to the bottom of your terminal while AI output scrolls above.
 
@@ -82,6 +82,7 @@ VIBE_NO_SCROLL=1 vibe-local
 - Error checkmark display improvements
 
 ### Bug Fixes
+- Fixed PowerShell parameter binding — `-p` no longer conflicts with `-ProgressAction` (PR #10 by @kn1cht)
 - Fixed `[` character leaking into output from broken CSI sequences
 - Fixed cursor position after DECSTBM setup on macOS Terminal.app
 - Fixed status line update during streaming (store-only pattern)
@@ -119,6 +120,8 @@ If you encounter display issues, use `VIBE_NO_SCROLL=1` to disable the scroll re
 
 ## Full Changelog
 
+- `56a1f8f` fix: PowerShell parameter binding (PR #10 by @kn1cht)
+- `bc491ab` docs: update README for v1.3.1 + add release notes
 - `7a8f81f` feat: DECSTBM scroll region — fixed footer with thread-safe store-only pattern
 - `9f8fce6` fix: error checkmark, status line guards, tool icons, heartbeat (UX audit)
 - `9725859` feat: v1.3.1 — type-ahead input, WebSearch HTML entity fix, UX improvements
@@ -126,4 +129,4 @@ If you encounter display issues, use `VIBE_NO_SCROLL=1` to disable the scroll re
 
 ---
 
-**Full diff**: https://github.com/ochyai/vibe-local/compare/v1.2.0...main
+**Full diff**: https://github.com/ochyai/vibe-local/compare/v1.3.1...v1.3.2
